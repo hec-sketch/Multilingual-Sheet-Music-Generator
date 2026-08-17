@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 import pymupdf as fitz
 
-from .textutil import looks_like_lyric, normalize_spacing
+from .textutil import is_wordlike, looks_like_lyric, normalize_spacing
 
 SECTION_PATTERN = re.compile(
     r"\b(pre[\s\-]?chorus|chorus|verse|bridge|intro(?:duction)?|outro|refrain|tag|coda|ending|interlude|vamp)\b"
@@ -365,6 +365,30 @@ def _lyric_bands(staves: list[Staff], page_height: float) -> list[tuple]:
     return bands
 
 
+_SPAN_SPLIT = re.compile(r"(?<=[–—―])(?=[^\W\d_])")
+
+
+def _split_span(text: str) -> list[str]:
+    """One span can carry more than one note's worth of text.
+
+    Engravers sometimes set 'down—this' as a single run because the dash closes
+    one phrase and the next syllable starts immediately. Split on whitespace, and
+    also after a long dash that is followed by a letter.
+    """
+    pieces: list[str] = []
+    for chunk in text.split():
+        for piece in _SPAN_SPLIT.split(chunk):
+            if not piece:
+                continue
+            if not is_wordlike(piece):
+                # A hyphen standing on its own belongs to the syllable before it.
+                if pieces:
+                    pieces[-1] += piece
+                continue
+            pieces.append(piece)
+    return pieces
+
+
 def extract_anchors(page, page_number: int, staves: list[Staff], lyric_font: tuple | None) -> list[Anchor]:
     anchors: list[Anchor] = []
     if not staves:
@@ -381,8 +405,11 @@ def extract_anchors(page, page_number: int, staves: list[Staff], lyric_font: tup
         mid_y = (y0 + y1) / 2
         for staff, (top, bottom) in zip(staves, bands):
             if top <= mid_y <= bottom and staff.x0 - 8 <= x0 <= staff.x1 + 8:
-                pieces = text.split()
+                pieces = _split_span(text)
+                if not pieces:
+                    break
                 if len(pieces) == 1:
+                    text = pieces[0]
                     anchors.append(
                         Anchor(page_number, staff.index, staff.system, staff.voice, x0, x1, y0, text)
                     )

@@ -1,14 +1,21 @@
-"""Match layout lines to score lines, voice by voice.
+"""Work out which words each voice sings, and where each syllable goes.
 
-The layout carries no English, so alignment is driven by three signals:
+Two engines live here.
 
-* section labels on both sides (``Ch1`` <-> ``Chorus 1``)
-* exact syllable counts, after applying the "two syllables, one note" boxes
-* per-line tags (``Harmonies``) that say which voices sing a line
+**Text alignment** (``align_voice_by_text``) is used when an English syllable
+layout has been supplied. Every syllable in the English score is compared against
+every syllable in the English layout, and the two are aligned end to end. Because
+the words themselves are being matched, the result is not a guess: the app knows
+that *this* note carries *that* layout syllable, so the translated syllable
+paired with it lands exactly there. Repeats, late entries, dropouts, canons and
+lines that wrap across systems and pages all fall out of the alignment for free.
 
-The search is a shortest-path over "which layout lines does this voice sing, in
-order", so a voice may skip lines other voices sing, and a musical line may wrap
-across systems and pages. Every result stays editable afterwards.
+**Count alignment** (``align_voice``) is the fallback for when no English layout
+is available. It has nothing to compare words against, so it works from section
+labels, syllable counts and per-line tags. It is far more approximate, which is
+why supplying the English layout is worth the extra upload.
+
+Both produce the same ``VoicePlan``, and everything they decide stays editable.
 """
 
 from __future__ import annotations
@@ -16,7 +23,22 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from .textutil import fold
+
 INFINITY = float("inf")
+
+# Text-alignment scoring. Positive numbers are rewards, negative are penalties.
+SAME_WORD = 2.0
+NEAR_WORD = 1.0
+WRONG_WORD = -1.5
+SECTION_AGREES = 0.4
+SECTION_DISAGREES = -1.2
+WRONG_VOICE_FOR_TAG = -0.6
+# Skipping layout the voice does not sing must stay cheap: a part that enters in
+# the last chorus has to step over the whole song to reach its words. Small but
+# not zero, so that where two readings tie the earlier one wins.
+SKIP_LAYOUT_SYLLABLE = -0.04
+NOTE_WITH_NO_WORD = -1.5  # leaving a note empty is expensive
 
 
 @dataclass
@@ -45,22 +67,31 @@ class VoicePlan:
     matched: int
     total: int
     cost: float
+    covered: int = 0
+    notes_total: int = 0
 
     @property
     def complete(self) -> bool:
         return self.matched == self.total
+
+    @property
+    def coverage(self) -> float:
+        return self.covered / self.notes_total if self.notes_total else 0.0
 
 
 # --------------------------------------------------------------------------- sections
 
 
 def normalize_section(name: str) -> str:
+    """Reduce a section label to a comparable key. 'Ch1' and 'Chorus 1' agree."""
     text = (name or "").strip().lower()
     if not text:
         return ""
     if re.fullmatch(r"\d+", text):
         return f"verse{text}"
     text = re.sub(r"[\.\-_]+", " ", text)
+    # 'ch1' and 'v2' are written without a space; give the number one.
+    text = re.sub(r"(?<=[a-z])(?=\d)", " ", text)
     text = re.sub(r"\bpre\s*ch(orus|oro)?\b", "prechorus", text)
     text = re.sub(r"\bch(orus|oro)?\b", "chorus", text)
     text = re.sub(r"\bv(erse|s)?\b", "verse", text)
@@ -73,7 +104,7 @@ def normalize_section(name: str) -> str:
 def build_section_map(layout_sections: list[str], score_sections: list[str]) -> dict[str, str]:
     """Map layout section labels onto score section names."""
     mapping: dict[str, str] = {}
-    score_by_key = {}
+    score_by_key: dict[str, str] = {}
     for name in score_sections:
         score_by_key.setdefault(normalize_section(name), name)
 
@@ -95,7 +126,7 @@ def build_section_map(layout_sections: list[str], score_sections: list[str]) -> 
     return mapping
 
 
-# --------------------------------------------------------------------------- costs
+# --------------------------------------------------------------------------- voices
 
 
 def _is_lead(voice: str) -> bool:
@@ -117,11 +148,194 @@ def _tag_fits(tag: str, voice: str) -> bool:
     return True
 
 
-# --------------------------------------------------------------------------- search
+# --------------------------------------------------------------------------- text alignment
+
+
+def _word_score(a: str, b: str) -> float:
+    if not a or not b:
+        return WRONG_WORD
+    if a == b:
+        return SAME_WORD
+    if min(len(a), len(b)) >= 2 and (a.startswith(b) or b.startswith(a)):
+        return NEAR_WORD
+    return WRONG_WORD
+
+
+def map_voice_to_layout(voice, score_lines, english_lines, section_map) -> list[tuple | None]:
+    """For each note of this voice, which English layout syllable sits on it.
+
+    Returns one entry per anchor: ``(layout_line_id, index_within_line)`` or
+    ``None`` where the alignment found nothing convincing.
+
+    This is a semi-global alignment. Every note of the voice must be accounted
+    for, but the layout is free to start and end wherever it likes and to skip
+    whole lines cheaply, because most voices sing only part of the song.
+    """
+    anchors = [anchor for line in score_lines for anchor in line.anchors]
+    if not anchors or not english_lines:
+        return [None] * len(anchors)
+
+    left = [(fold(a.text), a.section) for a in anchors]
+    right: list[tuple] = []
+    for line in english_lines:
+        section = section_map.get(line.section, line.section)
+        fits = _tag_fits(line.tag, voice)
+        for index, token in enumerate(line.tokens):
+            right.append((fold(token), section, fits, line.id, index))
+
+    rows, cols = len(left), len(right)
+    previous = [0.0] * (cols + 1)  # free start: the layout may begin anywhere
+    moves = [[0] * (cols + 1) for _ in range(rows + 1)]
+
+    for i in range(1, rows + 1):
+        word, section = left[i - 1]
+        current = [0.0] * (cols + 1)
+        current[0] = previous[0] + NOTE_WITH_NO_WORD
+        moves[i][0] = 1
+        for j in range(1, cols + 1):
+            other, other_section, fits, _, _ = right[j - 1]
+            score = _word_score(word, other)
+            if section and other_section:
+                score += SECTION_AGREES if section == other_section else SECTION_DISAGREES
+            if not fits:
+                score += WRONG_VOICE_FOR_TAG
+            diagonal = previous[j - 1] + score
+            up = previous[j] + NOTE_WITH_NO_WORD
+            leftward = current[j - 1] + SKIP_LAYOUT_SYLLABLE
+            if diagonal >= up and diagonal >= leftward:
+                current[j], moves[i][j] = diagonal, 0
+            elif up >= leftward:
+                current[j], moves[i][j] = up, 1
+            else:
+                current[j], moves[i][j] = leftward, 2
+        previous = current
+
+    end = max(range(cols + 1), key=lambda j: previous[j])  # free end on the layout side
+    mapping: list[tuple | None] = [None] * rows
+    i, j = rows, end
+    while i > 0:
+        move = moves[i][j]
+        if move == 0:
+            word, _ = left[i - 1]
+            other = right[j - 1]
+            # Refuse an outright wrong word: better to show a gap than a lie.
+            if _word_score(word, other[0]) > WRONG_WORD:
+                mapping[i - 1] = (other[3], other[4])
+            i, j = i - 1, j - 1
+        elif move == 1:
+            i -= 1
+        else:
+            j -= 1
+    return mapping
+
+
+def align_voice_by_text(
+    voice, score_lines, english_lines, translation, section_map
+) -> VoicePlan:
+    """Build this voice's plan from a word-for-word alignment against the English layout.
+
+    ``translation`` maps an English layout line id to its translated syllables.
+    """
+    mapping = map_voice_to_layout(voice, score_lines, english_lines, section_map)
+    by_id = {line.id: line for line in english_lines}
+
+    assignments: list[Assignment] = []
+    cursor = 0
+    covered = 0
+    notes_total = 0
+    for line in score_lines:
+        need = line.note_count
+        slice_ = mapping[cursor : cursor + need]
+        cursor += need
+        notes_total += need
+
+        tokens: list[str] = []
+        used: list[int] = []
+        short = 0
+        for entry in slice_:
+            if entry is None:
+                tokens.append("")
+                continue
+            line_id, index = entry
+            words = translation.get(line_id)
+            if words is None:
+                tokens.append("")
+                short += 1
+                continue
+            if index < len(words):
+                tokens.append(words[index])
+                covered += 1
+            else:
+                tokens.append("")
+                short += 1
+            if line_id not in used:
+                used.append(line_id)
+
+        blanks = sum(1 for t in tokens if not t)
+        if blanks == 0:
+            status, note = "ok", ""
+        elif blanks == need:
+            status = "unmatched"
+            note = (
+                "This voice's words were not found in the English layout, so there is nothing "
+                "to place here."
+            )
+        else:
+            status = "partial"
+            english_gap = sum(1 for e in slice_ if e is None)
+            if short and not english_gap:
+                note = (
+                    "The English line and its translation have a different number of syllables, "
+                    "so some notes are still empty."
+                )
+            else:
+                note = "Some notes here could not be matched to a line in the English layout."
+
+        assignments.append(
+            Assignment(
+                score_line_id=line.id,
+                voice=voice,
+                page=line.page,
+                section=line.section,
+                english=line.text,
+                tokens=tokens,
+                layout_line_ids=used,
+                status=status,
+                note=note,
+            )
+        )
+
+    matched = sum(1 for a in assignments if a.status == "ok")
+    return VoicePlan(
+        voice=voice,
+        assignments=assignments,
+        matched=matched,
+        total=len(assignments),
+        cost=0.0,
+        covered=covered,
+        notes_total=notes_total,
+    )
+
+
+def align_all_by_text(score_doc, english_lines, translation, section_map, voices=None):
+    grouped = score_doc.lines_by_voice()
+    targets = voices if voices is not None else score_doc.voices
+    plans: dict[str, VoicePlan] = {}
+    for voice in targets:
+        lines = grouped.get(voice, [])
+        if not lines:
+            continue
+        plans[voice] = align_voice_by_text(
+            voice, lines, english_lines, translation, section_map
+        )
+    return plans
+
+
+# --------------------------------------------------------------------------- count alignment
 
 
 def align_voice(voice, score_lines, layout_lines, section_map, allow_partial=True) -> VoicePlan:
-    """Choose which layout lines this voice sings, and spread them over its notes."""
+    """Fallback for when there is no English layout: choose lines by count and section."""
     slots = [anchor for line in score_lines for anchor in line.anchors]
     total = len(slots)
     if total == 0:
@@ -165,12 +379,10 @@ def align_voice(voice, score_lines, layout_lines, section_map, allow_partial=Tru
             base = row[i]
             if base == INFINITY:
                 continue
-            # Skip this layout line: another voice sings it.
             value = base + skip_cost(j, i)
             if value < nxt[i]:
                 nxt[i] = value
                 back[j + 1][i] = (i, 0, 0)
-            # Sing it in full.
             length = counts[j]
             end = i + length
             if length and end <= total:
@@ -178,7 +390,6 @@ def align_voice(voice, score_lines, layout_lines, section_map, allow_partial=Tru
                 if value < nxt[end]:
                     nxt[end] = value
                     back[j + 1][end] = (i, length, 0)
-            # Sing only part of it - a last resort for layouts that do not add up.
             if allow_partial and length > 1:
                 penalty = 6.0 + use_cost(j, i)
                 for take in range(1, length):
@@ -192,12 +403,10 @@ def align_voice(voice, score_lines, layout_lines, section_map, allow_partial=Tru
                             back[j + 1][end] = (i, take, offset)
 
     if dp[count][total] == INFINITY:
-        # Nothing reached the end; take the furthest position we could fill.
         best_i = max((i for i in range(total + 1) if dp[count][i] < INFINITY), default=0)
     else:
         best_i = total
 
-    # Walk the path back into a flat token stream.
     chosen: list[tuple] = []
     i = best_i
     for j in range(count, 0, -1):
@@ -253,15 +462,25 @@ def align_voice(voice, score_lines, layout_lines, section_map, allow_partial=Tru
         )
 
     matched = sum(1 for a in assignments if a.status == "ok")
-    return VoicePlan(voice, assignments, matched, len(assignments), dp[count][best_i])
+    filled = sum(1 for a in assignments for t in a.tokens if t)
+    return VoicePlan(
+        voice=voice,
+        assignments=assignments,
+        matched=matched,
+        total=len(assignments),
+        cost=dp[count][best_i],
+        covered=filled,
+        notes_total=total,
+    )
 
 
-def choose_style(layout_doc, score_doc, styles: list[str]) -> tuple[str, dict]:
-    """Work out where the translation lives by trying each reading and seeing which aligns.
+def choose_style(layout_doc, score_doc, styles: list[str], english_lines=None) -> tuple[str, dict]:
+    """Work out where the text lives in a layout by trying each reading and testing it.
 
-    A layout may be translation-only, or English with the translation added as comments.
-    Guessing from the proportion of comments is unreliable, so we test instead: the reading
-    that lets the busiest voice match cleanly is the right one.
+    A layout may be plain text, or text with the useful part added as comments.
+    Guessing from the proportion of comments is unreliable, so we test instead.
+    When an English layout is available the test is a word-for-word one; otherwise
+    it falls back to seeing which reading lets the busiest voice match cleanly.
     """
     from .layout import to_editable
 
@@ -283,9 +502,15 @@ def choose_style(layout_doc, score_doc, styles: list[str]) -> tuple[str, dict]:
             if line.section and line.section not in sections:
                 sections.append(line.section)
         mapping = build_section_map(sections, score_sections)
-        plan = align_voice(probe, probe_lines, lines, mapping, allow_partial=False)
-        covered = sum(1 for a in plan.assignments if a.status == "ok")
-        scores[style] = covered / max(1, plan.total)
+        if english_lines is None:
+            # Reading being tested is itself the text we match against the score.
+            found = map_voice_to_layout(probe, probe_lines, lines, mapping)
+            scores[style] = sum(1 for entry in found if entry) / max(1, len(found))
+        else:
+            plan = align_voice(probe, probe_lines, lines, mapping, allow_partial=False)
+            scores[style] = sum(1 for a in plan.assignments if a.status == "ok") / max(
+                1, plan.total
+            )
 
     best = max(scores, key=lambda s: scores[s])
     return best, scores

@@ -9,6 +9,11 @@ These documents are written by translators and vary a lot. This parser copes wit
 * two-column rows, where the left and right halves form one musical line
 * boxes drawn round syllables that share a single note, plus the prose note
   explaining them ("Cantar 2 silabas en una")
+
+The whole document is read before anything is classified, so the body column,
+the label margin and the instruction column are measured from the document as a
+whole rather than guessed page by page. That matters for template documents
+whose later pages are nearly empty.
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ from dataclasses import dataclass, field
 
 import pymupdf as fitz
 
-from .textutil import DASHES, normalize_spacing
+from .textutil import DASHES, fold, normalize_spacing
 
 # Words a translator writes in the margin to label a musical section.
 SECTION_LABEL = re.compile(
@@ -37,8 +42,8 @@ LINE_TAGS = re.compile(
 
 # Prose that is an instruction to the singer, not lyrics.
 INSTRUCTION_HINT = re.compile(
-    r"cantar|s[ií]laba|acentuad|sing|note[s]?\b|nota|repeat|repetir|veces|times|"
-    r"p[aá]gina|page|copyright|watch\s*tower|©",
+    r"cantar|s[ií]laba|acentuad|repeat|repetir|veces|"
+    r"p[aá]gina\s*\d|copyright|watch\s*tower|©|^\s*n\.?b\.?\b|^\s*nota\b|^\s*note\b",
     re.I,
 )
 
@@ -110,6 +115,7 @@ class LayoutDoc:
     lines: list[LayoutLine]
     sections: list[str]
     warnings: list[str] = field(default_factory=list)
+    page_count: int = 0
 
     def lyric_lines(self) -> list[LayoutLine]:
         return [line for line in self.lines if line.kind == "lyric"]
@@ -141,6 +147,8 @@ class EditableLine:
     kind: str = "lyric"
     from_annotation: bool = False
     inferred_join: bool = False
+    y: float = 0.0
+    order: int = 0
 
     @property
     def text(self) -> str:
@@ -154,7 +162,9 @@ class EditableLine:
         return list(self.tokens)
 
 
-def to_editable(doc: LayoutDoc, style: str = "All rows", overrides: dict | None = None) -> list[EditableLine]:
+def to_editable(
+    doc: LayoutDoc, style: str = "All rows", overrides: dict | None = None
+) -> list[EditableLine]:
     """Flatten a parsed layout into the editable, note-level view the UI works with."""
     overrides = overrides or {}
     out: list[EditableLine] = []
@@ -177,9 +187,13 @@ def to_editable(doc: LayoutDoc, style: str = "All rows", overrides: dict | None 
                 kind=line.kind,
                 from_annotation=line.from_annotation,
                 inferred_join=line.source == "inferred-join",
+                y=line.y,
             )
         )
-    return [line for line in out if line.tokens]
+    out = [line for line in out if line.tokens]
+    for index, line in enumerate(out):
+        line.order = index
+    return out
 
 
 # --------------------------------------------------------------------------- helpers
@@ -248,28 +262,11 @@ def _cluster_rows(items: list[tuple], tolerance: float) -> list[list[tuple]]:
     return rows
 
 
-def _label_margin(rows: list[list[tuple]]) -> float:
-    """Estimate the x below which text is a margin label rather than lyrics."""
-    starts: list[float] = []
-    for row in rows:
-        if len(row) >= 4:
-            starts.append(row[0][1])
-    if not starts:
-        return 0.0
-    body = statistics.median(starts)
-    return body - 8
-
-
 # --------------------------------------------------------------------------- entry
 
 
-def _suppress_running_headers(lines: list[LayoutLine], doc) -> None:
+def _suppress_running_headers(lines: list[LayoutLine], heights: dict[int, float], pages: int) -> None:
     """Titles repeated at the top or bottom of every page are not lyrics."""
-    if len(doc) < 2:
-        heights = {0: doc[0].rect.height}
-    else:
-        heights = {i: page.rect.height for i, page in enumerate(doc)}
-
     seen: dict[str, list[LayoutLine]] = {}
     for line in lines:
         height = heights.get(line.page, 842.0)
@@ -280,15 +277,13 @@ def _suppress_running_headers(lines: list[LayoutLine], doc) -> None:
         seen.setdefault(key, []).append(line)
 
     for group in seen.values():
-        if len({line.page for line in group}) >= 2 or len(doc) == 1:
+        if len({line.page for line in group}) >= 2 or pages == 1:
             for line in group:
                 line.kind = "note"
 
 
 def _propagate_join_groups(lines: list[LayoutLine]) -> int:
     """A translator draws the 'two syllables, one note' box once; apply it to every repeat."""
-    from .textutil import fold
-
     template: dict[str, list[list[int]]] = {}
     for line in lines:
         if line.kind == "lyric" and line.join_groups:
@@ -308,14 +303,12 @@ def _propagate_join_groups(lines: list[LayoutLine]) -> int:
     return applied
 
 
-def parse_layout(pdf_bytes: bytes) -> LayoutDoc:
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    lines: list[LayoutLine] = []
-    warnings: list[str] = []
-    sections_seen: list[str] = []
-    current_section = ""
-
+def _read_rows(doc) -> tuple[list[dict], dict[int, float]]:
+    """First pass: every visual row of every page, with its annotation context."""
+    pages: list[dict] = []
+    heights: dict[int, float] = {}
     for page_number, page in enumerate(doc):
+        heights[page_number] = page.rect.height
         annot_texts, boxes = _annotations(page)
 
         items: list[tuple] = []
@@ -325,7 +318,9 @@ def parse_layout(pdf_bytes: bytes) -> LayoutDoc:
                 items.append((round(y0, 1), x0, x1, text))
 
         # Some viewers do not fold annotation text into the page text; add anything missing.
-        existing = {normalize_spacing(" ".join(w[3] for w in row)) for row in _cluster_rows(items, 4.0)}
+        existing = {
+            normalize_spacing(" ".join(w[3] for w in row)) for row in _cluster_rows(items, 4.0)
+        }
         for rect, content in annot_texts:
             for offset, piece in enumerate(content.splitlines()):
                 piece = piece.strip()
@@ -345,10 +340,53 @@ def parse_layout(pdf_bytes: bytes) -> LayoutDoc:
 
         sizes = [w[2] - w[1] for w in items]
         tolerance = 5.0 if not sizes else max(4.0, statistics.median(sizes) * 0.35)
-        rows = _cluster_rows(items, tolerance)
-        margin = _label_margin(rows)
+        pages.append(
+            {
+                "page": page_number,
+                "rows": _cluster_rows(items, tolerance),
+                "annots": annot_texts,
+                "boxes": boxes,
+            }
+        )
+    return pages, heights
 
-        for row in rows:
+
+def _measure_columns(pages: list[dict]) -> tuple[float, float]:
+    """Where the sung text starts, and where the right-hand instruction column begins.
+
+    Measured across the whole document. A layout whose later pages are an empty
+    template has no body rows on those pages, so a per-page estimate would be wrong.
+    """
+    starts: list[float] = []
+    ends: list[float] = []
+    for entry in pages:
+        for row in entry["rows"]:
+            if len(row) >= 4:
+                starts.append(row[0][1])
+                ends.append(row[-1][2])
+    if not starts:
+        return 0.0, 1e9
+    body_start = statistics.median(starts)
+    body_end = statistics.median(ends)
+    return body_start - 8, max(body_start + 40, body_end * 0.62)
+
+
+def parse_layout(pdf_bytes: bytes) -> LayoutDoc:
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    pages, heights = _read_rows(doc)
+    margin, instruction_x = _measure_columns(pages)
+
+    lines: list[LayoutLine] = []
+    warnings: list[str] = []
+    sections_seen: list[str] = []
+    current_section = ""
+
+    for entry in pages:
+        page_number = entry["page"]
+        annot_texts = entry["annots"]
+        boxes = entry["boxes"]
+
+        for row in entry["rows"]:
             label_words = [w for w in row if margin and w[2] <= margin]
             body_words = [w for w in row if not (margin and w[2] <= margin)]
 
@@ -380,11 +418,15 @@ def parse_layout(pdf_bytes: bytes) -> LayoutDoc:
                 continue
 
             y = statistics.median([w[0] for w in row])
+            start_x = body_words[0][1]
+
+            # A row is an instruction rather than lyrics when it says so in words,
+            # when it is too short to be a musical line, or when it sits out in the
+            # margin column to the right of the sung text.
             kind = "lyric"
             if INSTRUCTION_HINT.search(body_text) or len(tokens) < 2:
                 kind = "note"
-            # Prose with no hyphenation at all in a hyphenated document is a note.
-            elif not any(t.text.endswith("-") for t in tokens) and len(body_text.split()) > 8:
+            elif start_x > instruction_x and not any(t.text.endswith("-") for t in tokens):
                 kind = "note"
 
             mid_x = (body_words[0][1] + body_words[-1][2]) / 2
@@ -425,7 +467,7 @@ def parse_layout(pdf_bytes: bytes) -> LayoutDoc:
 
             lines.append(line)
 
-    _suppress_running_headers(lines, doc)
+    _suppress_running_headers(lines, heights, len(doc))
     inferred = _propagate_join_groups(lines)
     if inferred:
         warnings.append(
@@ -435,14 +477,16 @@ def parse_layout(pdf_bytes: bytes) -> LayoutDoc:
 
     if not any(line.kind == "lyric" for line in lines):
         raise ValueError(
-            "No syllable lines were found in the layout PDF. If the translation lives only in "
+            "No syllable lines were found in this layout PDF. If the text lives only in "
             "sticky notes or comments, make sure they were saved into the file."
         )
 
     if not sections_seen:
         warnings.append(
-            "No section labels (Ch1, 1, Pre-Ch 1, ...) were found in the layout, so lines will be "
+            "No section labels (Ch1, 1, Pre-Ch 1, ...) were found in this layout, so lines will be "
             "matched in order rather than section by section."
         )
 
-    return LayoutDoc(lines=lines, sections=sections_seen, warnings=warnings)
+    return LayoutDoc(
+        lines=lines, sections=sections_seen, warnings=warnings, page_count=len(doc)
+    )
