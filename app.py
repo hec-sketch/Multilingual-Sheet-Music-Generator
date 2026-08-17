@@ -523,6 +523,14 @@ with tab_match:
     active_voices = [v for v in score_doc.voices if v not in skip]
 
     grouped = score_doc.lines_by_voice()
+    # The busiest voice is aligned first and used as a clock for all the others,
+    # so a part repeating a line the lead has already sung is placed by *when* it
+    # sings it. Built from every voice, including any left in English.
+    timeline = (
+        aligner.reference_timeline(score_doc, english_lines, section_map)
+        if use_text_matching
+        else {}
+    )
     plans: dict[str, aligner.VoicePlan] = {}
     for voice in active_voices:
         lines = grouped.get(voice, [])
@@ -530,7 +538,7 @@ with tab_match:
             continue
         if use_text_matching:
             plans[voice] = aligner.align_voice_by_text(
-                voice, lines, english_lines, translation, section_map
+                voice, lines, english_lines, translation, section_map, timeline
             )
         else:
             plans[voice] = aligner.align_voice(voice, lines, working_lines, section_map)
