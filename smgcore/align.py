@@ -34,6 +34,15 @@ WRONG_WORD = -1.5
 SECTION_AGREES = 0.4
 SECTION_DISAGREES = -1.2
 WRONG_VOICE_FOR_TAG = -0.6
+# When several places in the layout read the same, the deciding evidence is what
+# the rest of the choir is singing at that moment. The busiest voice is aligned
+# first and every other voice is then held loosely to its position in time.
+TIMELINE_FREE = 1  # syllables of slack before the pull starts
+TIMELINE_PULL = 0.08  # per syllable of drift beyond that
+TIMELINE_LIMIT = 1.5
+# A syllable that has to be folded onto a neighbouring note to keep a word whole.
+# One is what a translator will accept; two is asking a singer to swallow a word.
+MAX_FOLDED_SYLLABLES = 1
 # Skipping layout the voice does not sing must stay cheap: a part that enters in
 # the last chorus has to step over the whole song to reach its words. Small but
 # not zero, so that where two readings tie the earlier one wins.
@@ -148,6 +157,35 @@ def _tag_fits(tag: str, voice: str) -> bool:
     return True
 
 
+def _tag_bonus(tag: str, voice: str) -> float:
+    if not tag or _tag_fits(tag, voice):
+        return 0.0
+    return WRONG_VOICE_FOR_TAG
+
+
+def _allowed_sections(score_lines) -> list[set]:
+    """Which sections a note could plausibly belong to.
+
+    A section marker is printed above the system it opens, but the phrase often
+    starts on a pick-up note at the end of the system before it. Those notes are
+    labelled with the outgoing section even though they sing the incoming one, so
+    the first and last note of every line are allowed to belong to either.
+    """
+    out: list[set] = []
+    for index, line in enumerate(score_lines):
+        count = line.note_count
+        before = score_lines[index - 1].section if index else ""
+        after = score_lines[index + 1].section if index + 1 < len(score_lines) else ""
+        for position in range(count):
+            allowed = {line.section}
+            if position == 0 and before:
+                allowed.add(before)
+            if position == count - 1 and after:
+                allowed.add(after)
+            out.append(allowed)
+    return out
+
+
 # --------------------------------------------------------------------------- text alignment
 
 
@@ -161,7 +199,80 @@ def _word_score(a: str, b: str) -> float:
     return WRONG_WORD
 
 
-def map_voice_to_layout(voice, score_lines, english_lines, section_map) -> list[tuple | None]:
+def build_timeline(score_lines, mapping, english_lines) -> dict:
+    """Where in the layout the music has got to, at each moment of each system.
+
+    Built from one voice that has already been aligned. Other voices then have a
+    reference for *when* they are singing, which is what tells two identical
+    lines apart.
+    """
+    offsets: dict[int, int] = {}
+    running = 0
+    for line in english_lines:
+        offsets[line.id] = running
+        running += len(line.tokens)
+
+    timeline: dict[tuple, list] = {}
+    anchors = [anchor for line in score_lines for anchor in line.anchors]
+    for anchor, entry in zip(anchors, mapping):
+        if entry is None:
+            continue
+        line_id, index = entry
+        if line_id not in offsets:
+            continue
+        key = (anchor.page, anchor.system)
+        timeline.setdefault(key, []).append(
+            ((anchor.x0 + anchor.x1) / 2, offsets[line_id] + index)
+        )
+    for key in timeline:
+        timeline[key].sort()
+    return timeline
+
+
+TIMELINE_REACH = 12  # how far past the reference voice's last note we dare read
+
+
+def _expected_positions(anchors, timeline) -> list[float | None]:
+    """For each anchor, where the reference voice was in the layout at that moment.
+
+    Read off by interpolating across the system, so a part that answers after the
+    lead has stopped singing — the parenthesised echo at the end of a piece — is
+    understood to be *later* in the words, not stuck on the lead's last note.
+    """
+    if not timeline:
+        return [None] * len(anchors)
+    out: list[float | None] = []
+    for anchor in anchors:
+        points = timeline.get((anchor.page, anchor.system))
+        if not points:
+            out.append(None)
+            continue
+        centre = (anchor.x0 + anchor.x1) / 2
+        if len(points) == 1:
+            out.append(float(points[0][1]))
+            continue
+        first, last = points[0], points[-1]
+        if first[0] <= centre <= last[0]:
+            left, right = first, last
+            for lower, upper in zip(points, points[1:]):
+                if lower[0] <= centre <= upper[0]:
+                    left, right = lower, upper
+                    break
+        else:
+            left, right = first, last  # extrapolate on the system's overall pace
+        if right[0] == left[0]:
+            out.append(float(left[1]))
+            continue
+        value = left[1] + (right[1] - left[1]) * (centre - left[0]) / (right[0] - left[0])
+        out.append(
+            max(first[1] - TIMELINE_REACH, min(last[1] + TIMELINE_REACH, value))
+        )
+    return out
+
+
+def map_voice_to_layout(
+    voice, score_lines, english_lines, section_map, timeline=None
+) -> list[tuple | None]:
     """For each note of this voice, which English layout syllable sits on it.
 
     Returns one entry per anchor: ``(layout_line_id, index_within_line)`` or
@@ -175,30 +286,38 @@ def map_voice_to_layout(voice, score_lines, english_lines, section_map) -> list[
     if not anchors or not english_lines:
         return [None] * len(anchors)
 
-    left = [(fold(a.text), a.section) for a in anchors]
+    allowed = _allowed_sections(score_lines)
+    left = [(fold(a.text), allowed[i]) for i, a in enumerate(anchors)]
     right: list[tuple] = []
+    running = 0
     for line in english_lines:
         section = section_map.get(line.section, line.section)
-        fits = _tag_fits(line.tag, voice)
+        bonus = _tag_bonus(line.tag, voice)
         for index, token in enumerate(line.tokens):
-            right.append((fold(token), section, fits, line.id, index))
+            right.append((fold(token), section, bonus, line.id, index, running))
+            running += 1
+
+    expected = _expected_positions(anchors, timeline or {})
 
     rows, cols = len(left), len(right)
     previous = [0.0] * (cols + 1)  # free start: the layout may begin anywhere
     moves = [[0] * (cols + 1) for _ in range(rows + 1)]
 
     for i in range(1, rows + 1):
-        word, section = left[i - 1]
+        word, sections = left[i - 1]
+        want = expected[i - 1]
         current = [0.0] * (cols + 1)
         current[0] = previous[0] + NOTE_WITH_NO_WORD
         moves[i][0] = 1
         for j in range(1, cols + 1):
-            other, other_section, fits, _, _ = right[j - 1]
-            score = _word_score(word, other)
-            if section and other_section:
-                score += SECTION_AGREES if section == other_section else SECTION_DISAGREES
-            if not fits:
-                score += WRONG_VOICE_FOR_TAG
+            other, other_section, bonus, _, _, position = right[j - 1]
+            score = _word_score(word, other) + bonus
+            if sections and other_section and any(sections):
+                score += SECTION_AGREES if other_section in sections else SECTION_DISAGREES
+            if want is not None:
+                drift = abs(position - want) - TIMELINE_FREE
+                if drift > 0:
+                    score -= min(TIMELINE_LIMIT, drift * TIMELINE_PULL)
             diagonal = previous[j - 1] + score
             up = previous[j] + NOTE_WITH_NO_WORD
             leftward = current[j - 1] + SKIP_LAYOUT_SYLLABLE
@@ -229,15 +348,54 @@ def map_voice_to_layout(voice, score_lines, english_lines, section_map) -> list[
     return mapping
 
 
+def repair_word_starts(mapping, translation) -> dict[int, str]:
+    """Never begin a note on the tail of a word.
+
+    A harmony part often enters a bar after the lead, so its first note falls on
+    the *second* syllable of a word. In English that is harmless — "will not let
+    my hands drop down" still reads. In a language where the phrase opens
+    "Jeho-vá", starting the part on "vá" is nonsense. Where the syllables before
+    it are not sung by this voice anywhere, they are folded onto its first note,
+    exactly as a translator does by hand.
+
+    Returns {anchor index: replacement text}.
+    """
+    fixes: dict[int, str] = {}
+    for index, entry in enumerate(mapping):
+        if entry is None:
+            continue
+        line_id, position = entry
+        if position == 0:
+            continue
+        if index > 0 and mapping[index - 1] == (line_id, position - 1):
+            continue  # the syllable before it is sung, on the previous note
+        words = translation.get(line_id)
+        if not words or position >= len(words):
+            continue
+        head: list[str] = []
+        back = position - 1
+        while (
+            back >= 0
+            and len(head) < MAX_FOLDED_SYLLABLES
+            and words[back].rstrip().endswith(("-", "‐", "‑"))
+        ):
+            head.insert(0, words[back].rstrip())  # keep the hyphen: 'Jeho-vá' reads better
+            back -= 1
+        # Only worth doing if it actually completes the word back to its start.
+        if head and (back < 0 or not words[back].rstrip().endswith(("-", "‐", "‑"))):
+            fixes[index] = "".join(head) + words[position]
+    return fixes
+
+
 def align_voice_by_text(
-    voice, score_lines, english_lines, translation, section_map
+    voice, score_lines, english_lines, translation, section_map, timeline=None
 ) -> VoicePlan:
     """Build this voice's plan from a word-for-word alignment against the English layout.
 
     ``translation`` maps an English layout line id to its translated syllables.
     """
-    mapping = map_voice_to_layout(voice, score_lines, english_lines, section_map)
-    by_id = {line.id: line for line in english_lines}
+    mapping = map_voice_to_layout(voice, score_lines, english_lines, section_map, timeline)
+    fixes = repair_word_starts(mapping, translation)
 
     assignments: list[Assignment] = []
     cursor = 0
@@ -246,13 +404,14 @@ def align_voice_by_text(
     for line in score_lines:
         need = line.note_count
         slice_ = mapping[cursor : cursor + need]
+        base = cursor
         cursor += need
         notes_total += need
 
         tokens: list[str] = []
         used: list[int] = []
         short = 0
-        for entry in slice_:
+        for offset, entry in enumerate(slice_):
             if entry is None:
                 tokens.append("")
                 continue
@@ -263,7 +422,7 @@ def align_voice_by_text(
                 short += 1
                 continue
             if index < len(words):
-                tokens.append(words[index])
+                tokens.append(fixes.get(base + offset, words[index]))
                 covered += 1
             else:
                 tokens.append("")
@@ -317,16 +476,29 @@ def align_voice_by_text(
     )
 
 
+def reference_timeline(score_doc, english_lines, section_map, voices=None) -> dict:
+    """Align the busiest voice on its own, and use it as the clock for the rest."""
+    grouped = score_doc.lines_by_voice()
+    targets = [v for v in (voices if voices is not None else score_doc.voices) if grouped.get(v)]
+    if not targets or not english_lines:
+        return {}
+    reference = max(targets, key=lambda v: sum(line.note_count for line in grouped[v]))
+    lines = grouped[reference]
+    mapping = map_voice_to_layout(reference, lines, english_lines, section_map)
+    return build_timeline(lines, mapping, english_lines)
+
+
 def align_all_by_text(score_doc, english_lines, translation, section_map, voices=None):
     grouped = score_doc.lines_by_voice()
     targets = voices if voices is not None else score_doc.voices
+    timeline = reference_timeline(score_doc, english_lines, section_map, voices)
     plans: dict[str, VoicePlan] = {}
     for voice in targets:
         lines = grouped.get(voice, [])
         if not lines:
             continue
         plans[voice] = align_voice_by_text(
-            voice, lines, english_lines, translation, section_map
+            voice, lines, english_lines, translation, section_map, timeline
         )
     return plans
 

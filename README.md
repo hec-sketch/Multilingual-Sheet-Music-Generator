@@ -27,11 +27,17 @@ knows exactly which notes each layout line covers. The translated line sitting o
 drops straight onto those notes.
 
 On the test piece — *Do Not Let Your Hands Drop Down*, nine voice parts, 1,034 syllable
-positions — the two approaches differ on **60% of the notes**. With the English layout, every
-one of the 1,034 notes was filled correctly and every voice matched cleanly with nothing left
-for a human to fix.
+positions — the two approaches differ on **60% of the notes**.
 
 The app still works with three files. It just tells you plainly that it is guessing.
+
+### Checked against a hand-made score
+
+The app's output was compared, staff line by staff line, against the Aymara score a person had
+already produced by hand for the same piece: **112 of 112 staff lines carry exactly the same
+syllables**, across nine voice parts, nine pages and 1,034 notes — including the places where a
+part enters mid-word, where two syllables share a note, and where the same English line has two
+different translations depending on which repeat it is.
 
 ---
 
@@ -113,8 +119,11 @@ smgcore/
                   over section labels, tags, page geometry and syllable counts
   align.py        Two engines. With an English layout: a semi-global Needleman-Wunsch
                   alignment of each voice's printed lyrics against the English layout, giving
-                  an exact note-by-note mapping. Without one: the older search over section
-                  labels and syllable counts
+                  an exact note-by-note mapping. The busiest voice is aligned first and used
+                  as a clock, so a part that repeats a line the lead has already sung is
+                  placed by *when* it sings, not just by what the words say. Words are never
+                  left starting on a syllable fragment. Without an English layout: the older
+                  search over section labels and syllable counts
   render.py       Draws the syllables onto the no-lyrics score, shrinking anything that
                   would collide with its neighbours
 fonts/            Unicode fonts covering the accented and modifier characters used by
