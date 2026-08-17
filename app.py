@@ -1,320 +1,446 @@
-import re
-import unicodedata
-from difflib import SequenceMatcher
-from pathlib import Path
+"""Multi-lingual Sheet Music Generator.
 
-import fitz
+Transfers a translated syllable layout onto an engraved vocal score.
+Everything the matcher decides can be reviewed and corrected before the PDF is made.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import io
+
+import pandas as pd
 import streamlit as st
 
+from smgcore import align as aligner
+from smgcore import layout as layout_mod
+from smgcore import render as render_mod
+from smgcore import score as score_mod
+
 st.set_page_config(page_title="Multi-lingual Sheet Music Generator", page_icon="♪", layout="wide")
-MUSIC_CHARS = set("œ˙ÓŒ‰™♩♪♫♬")
+
+STYLE_OPTIONS = [
+    "All rows",
+    "Only comment/annotation rows",
+    "Only page text (ignore comments)",
+]
 
 
-def normalize_spacing(text):
-    text = text.replace("–", "-").replace("—", "-")
-    text = re.sub(r"\s*-\s*", "-", text.strip())
-    return re.sub(r"\s+", " ", text)
+# --------------------------------------------------------------------------- caching
 
 
-def lyric_tokens(text, keep_hyphens=False):
-    output = []
-    for word in normalize_spacing(text).split():
-        parts = [part for part in word.split("-") if part]
-        if keep_hyphens and len(parts) > 1:
-            output.extend([part + "-" for part in parts[:-1]])
-            output.append(parts[-1])
-        else:
-            output.extend(parts)
-    return output
+@st.cache_data(show_spinner="Reading the score...")
+def parse_score_cached(data: bytes):
+    return score_mod.parse_score(data)
 
 
-def compare_token(text):
-    text = unicodedata.normalize("NFKD", text.lower())
-    text = "".join(char for char in text if not unicodedata.combining(char))
-    text = text.replace("’", "'")
-    return re.sub(r"[^a-z0-9]", "", text)
+@st.cache_data(show_spinner="Reading the layout...")
+def parse_layout_cached(data: bytes):
+    return layout_mod.parse_layout(data)
 
 
-def extract_layout_pairs(pdf_bytes):
-    """Pair each translated annotation with the complete English row above it."""
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    pairs = []
-    for page_number, page in enumerate(doc):
-        grouped = {}
-        for word in page.get_text("words"):
-            x0, y0, x1, y1, text = word[:5]
-            if any(char.isalpha() for char in text):
-                key = round(y0, 1)
-                grouped.setdefault(key, []).append((x0, text))
-        text_lines = []
-        for y, words in grouped.items():
-            words.sort()
-            text = normalize_spacing(" ".join(word for x, word in words))
-            text_lines.append({"y": y, "text": text, "word_count": len(words)})
-
-        annotations = []
-        annot = page.first_annot
-        while annot:
-            content = (annot.info.get("content") or "").strip()
-            if content and any(char.isalpha() for char in content):
-                annotations.append({"y": annot.rect.y0, "x": annot.rect.x0,
-                                    "text": normalize_spacing(content)})
-            annot = annot.next
-        annotations.sort(key=lambda item: (item["y"], item["x"]))
-
-        for annotation in annotations:
-            candidates = [line for line in text_lines
-                          if 2 < annotation["y"] - line["y"] < 42
-                          and not re.search(r"\bx2\b|\bch3\b", line["text"], re.I)]
-            if not candidates:
-                raise ValueError(f"Could not find the English layout line above annotation: {annotation['text']}")
-            nearest_y = max(line["y"] for line in candidates)
-            nearest = [line for line in candidates if nearest_y - line["y"] < 2.0]
-            english = max(nearest, key=lambda line: line["word_count"])
-            english_tokens = lyric_tokens(english["text"])
-            target_tokens = lyric_tokens(annotation["text"], keep_hyphens=True)
-            nearby_notes = [line["text"] for line in text_lines
-                            if abs(line["y"] - english["y"]) < 3.0
-                            and re.search(r"\bx\s*\d+|\bch\s*\d+|repeat", line["text"], re.I)]
-            pairs.append({
-                "page": page_number, "english": english["text"],
-                "translation": annotation["text"], "english_tokens": english_tokens,
-                "target_tokens": target_tokens,
-                "counts_match": len(english_tokens) == len(target_tokens),
-                "repeat_hint": bool(nearby_notes),
-                "layout_notes": nearby_notes,
-            })
-    return pairs
+@st.cache_data(show_spinner="Checking the two scores match...")
+def geometry_cached(_score_doc, blank: bytes, key: str):
+    return render_mod.check_geometry(_score_doc, blank)
 
 
-def page_words(page):
-    return [tuple(word[:5]) for word in page.get_text("words")]
+@st.cache_data(show_spinner="Working out where the translation is...")
+def style_cached(_layout_doc, _score_doc, key: str):
+    return aligner.choose_style(_layout_doc, _score_doc, STYLE_OPTIONS)
 
 
-def is_score_lyric(word, page_height):
-    x0, y0, x1, y1, text = word
-    if text == "-" or not text.strip() or x0 < 88 or y0 < 55 or y0 > page_height - 35:
-        return False
-    if text.isdigit() or any(char in MUSIC_CHARS for char in text):
-        return False
-    if text in {"Verse", "Chorus", "Lead", "M.", "Male", "Full", "Score"}:
-        return False
-    return any(char.isalpha() for char in text)
+def digest(*chunks: bytes) -> str:
+    hasher = hashlib.sha256()
+    for chunk in chunks:
+        hasher.update(chunk or b"")
+    return hasher.hexdigest()[:16]
 
 
-def extract_score_anchors(english_bytes, blank_bytes):
-    english = fitz.open(stream=english_bytes, filetype="pdf")
-    blank = fitz.open(stream=blank_bytes, filetype="pdf")
-    if len(english) != len(blank):
-        raise ValueError("The English and no-lyrics scores have different page counts.")
-    anchors = []
-    for page_number, page in enumerate(english):
-        candidates = [word for word in page_words(page) if is_score_lyric(word, page.rect.height)]
-        counts = {}
-        for x0, y0, x1, y1, text in candidates:
-            key = round(y0, 1)
-            counts[key] = counts.get(key, 0) + 1
-        baselines = {key for key, count in counts.items() if count >= 4}
-        page_items = []
-        for x0, y0, x1, y1, text in candidates:
-            if round(y0, 1) in baselines:
-                page_items.append({"page": page_number, "x0": x0, "x1": x1,
-                                   "y0": y0, "source": text})
-        page_items.sort(key=lambda item: (round(item["y0"], 1), item["x0"]))
-        anchors.extend(page_items)
-    return anchors
+def reset_edits(token: str) -> None:
+    if st.session_state.get("_files") != token:
+        st.session_state["_files"] = token
+        st.session_state["layout_edits"] = {}
+        st.session_state["assign_edits"] = {}
+        st.session_state["skip_voices"] = []
+        st.session_state.pop("result_pdf", None)
 
 
-def line_match_score(score_tokens, layout_tokens):
-    a = [compare_token(token) for token in score_tokens]
-    b = [compare_token(token) for token in layout_tokens]
-    exact = sum(left == right for left, right in zip(a, b)) / max(1, len(b))
-    ratio = SequenceMatcher(None, a, b).ratio()
-    return 0.7 * exact + 0.3 * ratio
-
-
-def match_score_to_layout(anchors, pairs):
-    """Segment the score into recognized layout lines, including a final partial refrain."""
-    score = [anchor["source"] for anchor in anchors]
-    n = len(score)
-    dp = [-1.0] * (n + 1)
-    back = [None] * (n + 1)
-    dp[0] = 0.0
-    for position in range(n):
-        if dp[position] < 0:
-            continue
-        for pair_index, pair in enumerate(pairs):
-            full_length = len(pair["english_tokens"])
-            variants = [(pair["english_tokens"], pair["target_tokens"], False)]
-            remaining = n - position
-            if 2 <= remaining < full_length:
-                variants.append((pair["english_tokens"][-remaining:],
-                                 pair["target_tokens"][-remaining:], True))
-            for english_variant, target_variant, partial in variants:
-                length = len(english_variant)
-                end = position + length
-                if end > n or (partial and end != n):
-                    continue
-                confidence = line_match_score(score[position:end], english_variant)
-                threshold = 0.82 if partial else 0.72
-                if confidence < threshold:
-                    continue
-                context_bonus = 0.0
-                if partial:
-                    if pair.get("repeat_hint"):
-                        context_bonus += 0.20
-                    score_last = score[end - 1].strip()[-1:] if score[end - 1].strip() else ""
-                    layout_last = pair["english_tokens"][-1].strip()[-1:] if pair["english_tokens"] else ""
-                    if score_last in "!?" and score_last == layout_last:
-                        context_bonus += 0.05
-                value = dp[position] + confidence + context_bonus - (0.02 if partial else 0)
-                if value > dp[end]:
-                    dp[end] = value
-                    back[end] = (position, pair_index, confidence, target_variant, partial)
-    if back[n] is None:
-        raise ValueError("The English lyrics in the score could not be matched completely to the English lines in the layout PDF.")
-
-    matches = []
-    cursor = n
-    while cursor:
-        start, pair_index, confidence, target_variant, partial = back[cursor]
-        matches.append({"start": start, "end": cursor, "pair": pair_index,
-                        "confidence": confidence, "target": target_variant,
-                        "partial": partial})
-        cursor = start
-    matches.reverse()
-
-    target = []
-    diagnostics = []
-    for match in matches:
-        pair = pairs[match["pair"]]
-        expected = match["end"] - match["start"]
-        if len(match["target"]) != expected:
-            raise ValueError(f"The translated line '{pair['translation']}' does not have the required syllable correspondence.")
-        target.extend(match["target"])
-        english_display = " ".join(pair["english_tokens"][-expected:]) if match["partial"] else pair["english"]
-        translation_display = " ".join(match["target"])
-        diagnostics.append({
-            "english": english_display,
-            "translation": translation_display if match["partial"] else pair["translation"],
-            "syllables": expected, "confidence": match["confidence"],
-            "partial": match["partial"],
-            "layout_notes": pair.get("layout_notes", []),
-        })
-    if len(target) != len(anchors):
-        raise ValueError("Final alignment failed. No PDF was generated.")
-    return target, diagnostics
-
-
-def available_width(anchors, index):
-    current = anchors[index]
-    same_row = [item for item in anchors
-                if item["page"] == current["page"] and abs(item["y0"] - current["y0"]) < 0.6]
-    same_row.sort(key=lambda item: item["x0"])
-    position = same_row.index(current)
-    left = 90 if position == 0 else (same_row[position - 1]["x1"] + current["x0"]) / 2
-    right = 572 if position == len(same_row) - 1 else (current["x1"] + same_row[position + 1]["x0"]) / 2
-    return max(7, right - left - 1), left, right
-
-
-def create_score(blank_bytes, anchors, target, preferred_size, vertical_offset):
-    if len(anchors) != len(target):
-        raise ValueError("The final anchor and syllable counts differ.")
-    doc = fitz.open(stream=blank_bytes, filetype="pdf")
-    font_path = Path(__file__).with_name("DejaVuSans.ttf")
-    font = fitz.Font(fontfile=str(font_path))
-    for page in doc:
-        page.insert_font(fontname="MatchedLyrics", fontfile=str(font_path))
-    for index, (anchor, syllable) in enumerate(zip(anchors, target)):
-        maximum, left, right = available_width(anchors, index)
-        natural = font.text_length(syllable, fontsize=preferred_size)
-        size = preferred_size if natural <= maximum else max(5.0, preferred_size * maximum / natural)
-        width = font.text_length(syllable, fontsize=size)
-        center = (anchor["x0"] + anchor["x1"]) / 2
-        x = min(max(center - width / 2, left), right - width)
-        doc[anchor["page"]].insert_text(
-            (x, anchor["y0"] + vertical_offset), syllable,
-            fontname="MatchedLyrics", fontsize=size, color=(0, 0, 0), overlay=True,
-        )
-    return doc.tobytes(garbage=4, deflate=True)
-
-
-def render_page(pdf_bytes, page_number):
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    pix = doc[page_number].get_pixmap(matrix=fitz.Matrix(1.4, 1.4), alpha=False)
-    return pix.tobytes("png")
-
+# --------------------------------------------------------------------------- sidebar
 
 st.title("Multi-lingual Sheet Music Generator")
-st.caption("Matches English lyric lines in the score to the English lines in the layout PDF, then transfers the paired translation syllables.")
+st.caption(
+    "Reads the section labels and syllable counts in your layout, works out which lines each "
+    "voice sings, and writes them under the notes. Nothing is final until you say so."
+)
 
-c1, c2, c3 = st.columns(3)
-with c1:
-    english_file = st.file_uploader("English score", type=["pdf"])
-with c2:
-    blank_file = st.file_uploader("Matching score without lyrics", type=["pdf"])
-with c3:
-    layout_file = st.file_uploader("Annotated syllable-layout PDF", type=["pdf"])
+with st.sidebar:
+    st.header("1. Your three PDFs")
+    english_file = st.file_uploader("English score", type=["pdf"], key="english")
+    blank_file = st.file_uploader("Same score, no lyrics", type=["pdf"], key="blank")
+    layout_file = st.file_uploader("Syllable layout (translation)", type=["pdf"], key="layout")
 
-with st.expander("Optional placement adjustment"):
-    a, b = st.columns(2)
-    preferred_size = a.slider("Maximum lyric font size", 5.0, 10.0, 7.25, 0.25)
-    vertical_offset = b.slider("Vertical baseline offset", 5.0, 10.0, 7.6, 0.1)
+    st.divider()
+    st.header("Placement")
+    max_size = st.slider("Maximum text size", 4.0, 12.0, 7.25, 0.25)
+    baseline = st.slider("Distance below the staff", 3.0, 14.0, 7.6, 0.1)
+    font_choice = st.selectbox("Font", list(render_mod.BUNDLED_FONTS), index=0)
 
-if english_file and blank_file and layout_file:
-    try:
-        pairs = extract_layout_pairs(layout_file.getvalue())
-        anchors = extract_score_anchors(english_file.getvalue(), blank_file.getvalue())
-        target, matches = match_score_to_layout(anchors, pairs)
+if not (english_file and blank_file and layout_file):
+    st.info("Upload all three PDFs in the sidebar to begin.")
+    st.markdown(
+        """
+        **What each file is**
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Layout line pairs", len(pairs))
-        m2.metric("Score lyric positions", len(anchors))
-        m3.metric("Matched score lines", len(matches))
-        m4.metric("Transferred syllables", len(target))
+        | File | What it is |
+        | --- | --- |
+        | English score | The engraved score with the English lyrics under the notes |
+        | Same score, no lyrics | The identical engraving with the lyrics removed - this is the canvas |
+        | Syllable layout | The translator's document: the translated syllables, laid out line by line |
 
-        unmatched_pairs = [pair for pair in pairs if not pair["counts_match"]]
-        if unmatched_pairs:
-            st.warning(f"{len(unmatched_pairs)} unused layout line pair(s) have unequal counts. Used lines still passed exact checks.")
+        The layout may be translation-only or may show English with the translation added as
+        comments. Both work. Section labels such as `Ch1`, `1`, `Pre-Ch 2` help a great deal.
+        """
+    )
+    st.stop()
 
-        minimum_confidence = min(match["confidence"] for match in matches)
-        if minimum_confidence < 0.82:
-            st.warning("One or more English line matches have lower confidence. Review the match report before generating.")
+english_bytes = english_file.getvalue()
+blank_bytes = blank_file.getvalue()
+layout_bytes = layout_file.getvalue()
+reset_edits(digest(english_bytes, blank_bytes, layout_bytes))
+
+try:
+    score_doc = parse_score_cached(english_bytes)
+except Exception as error:  # noqa: BLE001
+    st.error(f"The English score could not be read.\n\n{error}")
+    st.stop()
+
+try:
+    layout_doc = parse_layout_cached(layout_bytes)
+except Exception as error:  # noqa: BLE001
+    st.error(f"The syllable layout could not be read.\n\n{error}")
+    st.stop()
+
+geometry_problems = geometry_cached(score_doc, blank_bytes, digest(english_bytes, blank_bytes))
+
+tab_overview, tab_lines, tab_match, tab_make = st.tabs(
+    ["Overview", "Layout lines", "Matching", "Generate"]
+)
+
+# --------------------------------------------------------------------------- overview
+
+with tab_overview:
+    left, right = st.columns(2)
+    with left:
+        st.subheader("The score")
+        st.metric("Pages", score_doc.page_count)
+        st.metric("Voice parts", len(score_doc.voices))
+        st.metric("Syllable positions", len(score_doc.anchors))
+        st.write("**Sections found**")
+        if score_doc.sections:
+            st.write(", ".join(name for _, _, _, name in score_doc.sections))
         else:
-            st.success("All score lines were matched to the layout, and every used line has an exact syllable count.")
+            st.write("_none_")
+        st.write("**Voices found**")
+        st.write(", ".join(score_doc.voices))
+    with right:
+        st.subheader("The layout")
+        st.metric("Syllable lines", len(layout_doc.lyric_lines()))
+        st.metric("Sections", len(layout_doc.sections))
+        st.metric(
+            "Lines written as comments",
+            f"{layout_doc.annotation_share:.0%}",
+        )
+        st.write("**Sections found**")
+        st.write(", ".join(layout_doc.sections) if layout_doc.sections else "_none_")
 
-        with st.expander("Review line-by-line matching", expanded=False):
-            for number, match in enumerate(matches, 1):
-                st.markdown(f"**{number}. {match['syllables']} syllables, {match['confidence']:.0%} English match**")
-                st.write("English:", match["english"])
-                st.write("Translation:", match["translation"])
-                if match.get("partial"):
-                    note = "; ".join(match.get("layout_notes", [])) or "terminal phrase match"
-                    st.caption(f"Partial refrain selected using layout context: {note}")
+    for problem in geometry_problems:
+        st.error(problem)
+    for warning in score_doc.warnings + layout_doc.warnings:
+        st.warning(warning)
+    if not geometry_problems:
+        st.success("The two scores are the same engraving, so syllables will land on the notes.")
 
-        if st.button("Generate matched score", type="primary", use_container_width=True):
-            st.session_state["finished_pdf"] = create_score(
-                blank_file.getvalue(), anchors, target, preferred_size, vertical_offset
-            )
+# --------------------------------------------------------------------------- layout lines
 
-        if "finished_pdf" in st.session_state:
-            result = st.session_state["finished_pdf"]
-            doc = fitz.open(stream=result, filetype="pdf")
-            st.subheader("Preview")
-            columns = st.columns(min(2, len(doc)))
-            for page_number in range(len(doc)):
-                columns[page_number % len(columns)].image(
-                    render_page(result, page_number), caption=f"Page {page_number + 1}",
-                    use_container_width=True,
+with tab_lines:
+    st.subheader("Check the translated lines")
+    st.caption(
+        "One box per note. To sing two syllables on one note, delete the space between them. "
+        "To split them again, add a space. Untick a row to leave it out entirely."
+    )
+
+    best_style, style_scores = style_cached(
+        layout_doc, score_doc, digest(english_bytes, layout_bytes)
+    )
+    style = st.radio(
+        "Where is the translation in this layout?",
+        STYLE_OPTIONS,
+        index=STYLE_OPTIONS.index(best_style),
+        horizontal=True,
+        help=(
+            "Chosen by trying each reading and seeing which one matches the score. "
+            + " | ".join(f"{name}: {value:.0%}" for name, value in style_scores.items())
+        ),
+    )
+
+    editable = layout_mod.to_editable(layout_doc, style, st.session_state["layout_edits"])
+    if not editable:
+        st.error("That choice leaves no lines. Pick a different option above.")
+        st.stop()
+
+    frame = pd.DataFrame(
+        [
+            {
+                "Use": True,
+                "Page": line.page + 1,
+                "Section": line.section,
+                "Tag": line.tag,
+                "Notes": line.note_count,
+                "Syllables": line.text,
+                "Box applied": "yes" if line.inferred_join else "",
+                "_id": line.id,
+            }
+            for line in editable
+        ]
+    )
+    edited = st.data_editor(
+        frame,
+        hide_index=True,
+        use_container_width=True,
+        height=430,
+        column_config={
+            "Use": st.column_config.CheckboxColumn(width="small"),
+            "Page": st.column_config.NumberColumn(width="small", disabled=True),
+            "Section": st.column_config.TextColumn(width="small"),
+            "Tag": st.column_config.TextColumn(width="small"),
+            "Notes": st.column_config.NumberColumn(width="small", disabled=True),
+            "Syllables": st.column_config.TextColumn(width="large"),
+            "Box applied": st.column_config.TextColumn(width="small", disabled=True),
+            "_id": None,
+        },
+        key="layout_editor",
+    )
+
+    changed = 0
+    for _, row in edited.iterrows():
+        original = next(l for l in editable if l.id == row["_id"])
+        if row["Syllables"] != original.text:
+            st.session_state["layout_edits"][int(row["_id"])] = row["Syllables"]
+            changed += 1
+    dropped = {int(r["_id"]) for _, r in edited.iterrows() if not r["Use"]}
+    st.session_state["dropped_layout"] = dropped
+    if changed:
+        st.info(f"{changed} line(s) edited. The matching will use your version.")
+
+# Rebuild the working line list from the edits above.
+working_lines = [
+    line
+    for line in layout_mod.to_editable(layout_doc, style, st.session_state["layout_edits"])
+    if line.id not in st.session_state.get("dropped_layout", set())
+]
+# Let the user's Section/Tag edits flow through.
+edit_lookup = {int(r["_id"]): r for _, r in edited.iterrows()}
+for line in working_lines:
+    row = edit_lookup.get(line.id)
+    if row is not None:
+        line.section = str(row["Section"] or "")
+        line.tag = str(row["Tag"] or "")
+
+layout_sections = []
+for line in working_lines:
+    if line.section and line.section not in layout_sections:
+        layout_sections.append(line.section)
+score_sections = [name for _, _, _, name in score_doc.sections]
+
+# --------------------------------------------------------------------------- matching
+
+with tab_match:
+    st.subheader("Match the layout to the score")
+
+    with st.expander("How sections line up", expanded=False):
+        default_map = aligner.build_section_map(layout_sections, score_sections)
+        choices = ["(ignore)"] + score_sections
+        section_map: dict[str, str] = {}
+        columns = st.columns(min(4, max(1, len(layout_sections))))
+        for index, label in enumerate(layout_sections):
+            with columns[index % len(columns)]:
+                guess = default_map.get(label)
+                section_map[label] = st.selectbox(
+                    label,
+                    choices,
+                    index=choices.index(guess) if guess in choices else 0,
+                    key=f"secmap_{label}",
                 )
-            st.download_button(
-                "Download finished score", result, "matched_translation_score.pdf",
-                "application/pdf", type="primary", use_container_width=True,
-            )
-    except Exception as error:
-        st.error(str(error))
-else:
-    st.info("Upload the English score, no-lyrics score, and annotated syllable-layout PDF.")
+        section_map = {k: v for k, v in section_map.items() if v != "(ignore)"}
 
-st.divider()
-st.caption("The app does not infer performance order from counts. It recognizes the English lyrics line by line and transfers only their paired translation lines.")
+    skip = st.multiselect(
+        "Voices to leave in English",
+        score_doc.voices,
+        default=st.session_state.get("skip_voices", []),
+        help="Anything selected here is skipped entirely and keeps no lyrics.",
+    )
+    st.session_state["skip_voices"] = skip
+    active_voices = [v for v in score_doc.voices if v not in skip]
+
+    grouped = score_doc.lines_by_voice()
+    plans = {}
+    for voice in active_voices:
+        lines = grouped.get(voice, [])
+        if lines:
+            plans[voice] = aligner.align_voice(voice, lines, working_lines, section_map)
+
+    summary = pd.DataFrame(
+        [
+            {
+                "Voice": plan.voice,
+                "Lines": plan.total,
+                "Matched": plan.matched,
+                "Needs a look": plan.total - plan.matched,
+            }
+            for plan in plans.values()
+        ]
+    )
+    st.dataframe(summary, hide_index=True, use_container_width=True)
+
+    trouble = int(summary["Needs a look"].sum()) if not summary.empty else 0
+    if trouble:
+        st.warning(
+            f"{trouble} line(s) could not be matched automatically. Open the voice below and type "
+            "the syllables in - you can still generate the PDF either way."
+        )
+    else:
+        st.success("Every line matched. Have a look through, then go to Generate.")
+
+    voice = st.selectbox("Voice to review", list(plans), key="review_voice")
+    plan = plans[voice]
+
+    rows = []
+    for assignment in plan.assignments:
+        key = f"{voice}||{assignment.score_line_id}"
+        override = st.session_state["assign_edits"].get(key)
+        text = override if override is not None else " ".join(assignment.tokens)
+        rows.append(
+            {
+                "Page": assignment.page + 1,
+                "Section": assignment.section,
+                "English": assignment.english,
+                "Notes": len(assignment.tokens),
+                "Syllables": text,
+                "Status": assignment.status,
+                "_key": key,
+            }
+        )
+    voice_frame = pd.DataFrame(rows)
+    edited_voice = st.data_editor(
+        voice_frame,
+        hide_index=True,
+        use_container_width=True,
+        height=430,
+        column_config={
+            "Page": st.column_config.NumberColumn(width="small", disabled=True),
+            "Section": st.column_config.TextColumn(width="small", disabled=True),
+            "English": st.column_config.TextColumn(width="large", disabled=True),
+            "Notes": st.column_config.NumberColumn(width="small", disabled=True),
+            "Syllables": st.column_config.TextColumn(width="large"),
+            "Status": st.column_config.TextColumn(width="small", disabled=True),
+            "_key": None,
+        },
+        key=f"voice_editor_{voice}",
+    )
+    for _, row in edited_voice.iterrows():
+        st.session_state["assign_edits"][row["_key"]] = row["Syllables"]
+
+    mismatches = [
+        (row["Page"], len(str(row["Syllables"]).split()), row["Notes"])
+        for _, row in edited_voice.iterrows()
+        if len(str(row["Syllables"]).split()) != row["Notes"]
+    ]
+    if mismatches:
+        st.error(
+            f"{len(mismatches)} line(s) have the wrong number of syllables for their notes. "
+            "Join two syllables by deleting the space between them, or split one by adding a space."
+        )
+        st.dataframe(
+            pd.DataFrame(mismatches, columns=["Page", "Syllables given", "Notes available"]),
+            hide_index=True,
+        )
+
+# --------------------------------------------------------------------------- generate
+
+with tab_make:
+    st.subheader("Make the PDF")
+
+    placements: dict[int, list[str]] = {}
+    issues: list[str] = []
+    for voice_name, voice_plan in plans.items():
+        for assignment in voice_plan.assignments:
+            key = f"{voice_name}||{assignment.score_line_id}"
+            text = st.session_state["assign_edits"].get(key)
+            tokens = text.split() if text is not None else list(assignment.tokens)
+            need = len(assignment.tokens)
+            if len(tokens) > need:
+                issues.append(
+                    f"{voice_name}, page {assignment.page + 1}: {len(tokens)} syllables for "
+                    f"{need} notes - the extra ones were left off."
+                )
+                tokens = tokens[:need]
+            elif len(tokens) < need:
+                issues.append(
+                    f"{voice_name}, page {assignment.page + 1}: {len(tokens)} syllables for "
+                    f"{need} notes - those notes were left empty."
+                )
+                tokens = tokens + [""] * (need - len(tokens))
+            placements[assignment.score_line_id] = tokens
+
+    for issue in issues[:12]:
+        st.warning(issue)
+    if len(issues) > 12:
+        st.caption(f"...and {len(issues) - 12} more.")
+
+    if st.button("Generate the score", type="primary", use_container_width=True):
+        try:
+            settings = render_mod.RenderSettings(
+                max_size=max_size, baseline_offset=baseline, font_choice=font_choice
+            )
+            st.session_state["result_pdf"] = render_mod.render(
+                score_doc, blank_bytes, placements, settings
+            )
+        except Exception as error:  # noqa: BLE001
+            st.error(f"The PDF could not be made.\n\n{error}")
+
+    if st.session_state.get("result_pdf"):
+        result = st.session_state["result_pdf"]
+        st.download_button(
+            "Download the finished score",
+            result,
+            "translated_score.pdf",
+            "application/pdf",
+            type="primary",
+            use_container_width=True,
+        )
+
+        report = io.StringIO()
+        report.write("voice,page,section,english,syllables\n")
+        for voice_name, voice_plan in plans.items():
+            for assignment in voice_plan.assignments:
+                key = f"{voice_name}||{assignment.score_line_id}"
+                text = st.session_state["assign_edits"].get(key, " ".join(assignment.tokens))
+                english = assignment.english.replace('"', "'")
+                report.write(
+                    f'"{voice_name}",{assignment.page + 1},"{assignment.section}",'
+                    f'"{english}","{text}"\n'
+                )
+        st.download_button(
+            "Download a checking sheet (CSV)",
+            report.getvalue().encode("utf-8"),
+            "alignment_report.csv",
+            "text/csv",
+            use_container_width=True,
+        )
+
+        st.write("**Preview**")
+        import pymupdf as fitz
+
+        total = fitz.open(stream=result, filetype="pdf").page_count
+        page_pick = st.number_input("Page", 1, total, 1)
+        st.image(render_mod.page_image(result, int(page_pick) - 1, 2.0), use_container_width=True)
