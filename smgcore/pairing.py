@@ -223,7 +223,7 @@ def pair_layouts(english_lines, translated_lines) -> PairingResult:
         notes.append(
             f"{len(count_gaps)} line(s) have a different number of syllables in the two "
             "languages. Usually that means a 'two syllables on one note' box is missing - join "
-            "them on the Layout lines step by deleting the space between them."
+            "them on Step 2 by deleting the space between them."
         )
 
     return PairingResult(pairs=pairs, confidence=confidence, notes=notes)

@@ -42,10 +42,15 @@ LINE_TAGS = re.compile(
 
 # Prose that is an instruction to the singer, not lyrics.
 INSTRUCTION_HINT = re.compile(
-    r"cantar|s[ií]laba|acentuad|repeat|repetir|veces|"
+    r"cantar|s[ií]laba|acentuad|repeat|repetir|veces|incorrect[oa]|correct[oa]\s*:|"
     r"p[aá]gina\s*\d|copyright|watch\s*tower|©|^\s*n\.?b\.?\b|^\s*nota\b|^\s*note\b",
     re.I,
 )
+
+# The document's own title line, e.g. "jwb-141 - By Faith". A publication code at
+# the very start is the reliable signal; the words after it are the song title in
+# whatever language, so they cannot be matched on.
+TITLE_LINE = re.compile(r"^\s*[a-z]{2,5}\s*-?\s*\d{2,5}\s*-", re.I)
 
 
 @dataclass
@@ -149,6 +154,9 @@ class EditableLine:
     inferred_join: bool = False
     y: float = 0.0
     order: int = 0
+    # Set when this line is a second or later performance of a block the layout
+    # wrote once (a chorus sung three times). Holds the id of the written line.
+    repeat_of: int | None = None
 
     @property
     def text(self) -> str:
@@ -160,6 +168,23 @@ class EditableLine:
 
     def merged_tokens(self) -> list[str]:
         return list(self.tokens)
+
+
+# "By faith x3" is a line sung three times, not two words and a third syllable.
+REPEAT_MARKER = re.compile(r"^[x×]\s*(\d+)$", re.I)
+
+
+def expand_repeat_marker(tokens: list[str]) -> list[str]:
+    """Write a repeated line out in full, so its syllables cover every note."""
+    if len(tokens) < 2:
+        return tokens
+    match = REPEAT_MARKER.match(tokens[-1].strip())
+    if not match:
+        return tokens
+    times = int(match.group(1))
+    if not 2 <= times <= 8:
+        return tokens
+    return tokens[:-1] * times
 
 
 def to_editable(
@@ -177,6 +202,7 @@ def to_editable(
             continue
         text = overrides.get(line.id)
         tokens = text.split() if text is not None else line.merged_tokens()
+        tokens = expand_repeat_marker(tokens)
         out.append(
             EditableLine(
                 id=line.id,
@@ -199,19 +225,33 @@ def to_editable(
 # --------------------------------------------------------------------------- helpers
 
 
+# Shapes a translator draws round syllables to mean "sing these on one note".
+# Highlights are deliberately not here: a highlight marks words a reviewer is
+# commenting on, which is the opposite of joining them.
+JOIN_SHAPES = ("Square", "Circle", "Polygon", "Ink")
+
+# Annotation types whose text is typed onto the page itself, and so is part of
+# the layout. A sticky note ("Text") or its "Popup" is a remark to the reader
+# that happens to carry a page position; splicing it into the row underneath
+# corrupts that line's syllables.
+PAGE_TEXT_ANNOTS = ("FreeText",)
+
+
 def _annotations(page):
-    """Return (text_annots, box_rects) for one page."""
-    texts, boxes = [], []
+    """Return (page_text_annots, box_rects, comments) for one page."""
+    texts, boxes, comments = [], [], []
     annot = page.first_annot
     while annot:
         kind = annot.type[1]
         content = (annot.info.get("content") or "").strip()
-        if kind in ("Square", "Circle", "Highlight", "Polygon", "Ink"):
+        if kind in JOIN_SHAPES:
             boxes.append(fitz.Rect(annot.rect))
-        elif content:
+        elif content and kind in PAGE_TEXT_ANNOTS:
             texts.append((fitz.Rect(annot.rect), content))
+        elif content:
+            comments.append((fitz.Rect(annot.rect), content))
         annot = annot.next
-    return texts, boxes
+    return texts, boxes, comments
 
 
 def tokenize_words(words: list[tuple]) -> list[Token]:
@@ -266,7 +306,13 @@ def _cluster_rows(items: list[tuple], tolerance: float) -> list[list[tuple]]:
 
 
 def _suppress_running_headers(lines: list[LayoutLine], heights: dict[int, float], pages: int) -> None:
-    """Titles repeated at the top or bottom of every page are not lyrics."""
+    """Titles repeated at the top or bottom of every page are not lyrics.
+
+    A running header is by definition text that repeats across pages, so the same
+    line must be seen on two or more of them. A single-page layout has no running
+    headers at all — its first and last lines are ordinary lyrics and must not be
+    thrown away for sitting near the edge of the paper.
+    """
     seen: dict[str, list[LayoutLine]] = {}
     for line in lines:
         height = heights.get(line.page, 842.0)
@@ -277,7 +323,7 @@ def _suppress_running_headers(lines: list[LayoutLine], heights: dict[int, float]
         seen.setdefault(key, []).append(line)
 
     for group in seen.values():
-        if len({line.page for line in group}) >= 2 or pages == 1:
+        if len({line.page for line in group}) >= 2:
             for line in group:
                 line.kind = "note"
 
@@ -309,7 +355,7 @@ def _read_rows(doc) -> tuple[list[dict], dict[int, float]]:
     heights: dict[int, float] = {}
     for page_number, page in enumerate(doc):
         heights[page_number] = page.rect.height
-        annot_texts, boxes = _annotations(page)
+        annot_texts, boxes, comments = _annotations(page)
 
         items: list[tuple] = []
         for word in page.get_text("words"):
@@ -346,6 +392,7 @@ def _read_rows(doc) -> tuple[list[dict], dict[int, float]]:
                 "rows": _cluster_rows(items, tolerance),
                 "annots": annot_texts,
                 "boxes": boxes,
+                "comments": comments,
             }
         )
     return pages, heights
@@ -424,7 +471,9 @@ def parse_layout(pdf_bytes: bytes) -> LayoutDoc:
             # when it is too short to be a musical line, or when it sits out in the
             # margin column to the right of the sung text.
             kind = "lyric"
-            if INSTRUCTION_HINT.search(body_text) or len(tokens) < 2:
+            if INSTRUCTION_HINT.search(body_text) or TITLE_LINE.match(body_text):
+                kind = "note"
+            elif len(tokens) < 2:
                 kind = "note"
             elif start_x > instruction_x and not any(t.text.endswith("-") for t in tokens):
                 kind = "note"
@@ -472,7 +521,7 @@ def parse_layout(pdf_bytes: bytes) -> LayoutDoc:
     if inferred:
         warnings.append(
             f"A box marking syllables that share one note was drawn on {inferred} line(s) and "
-            "applied to the identical lines elsewhere in the layout. Check these on the Lines step."
+            "applied to the identical lines elsewhere in the layout. Check these on Step 2."
         )
 
     if not any(line.kind == "lyric" for line in lines):

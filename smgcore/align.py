@@ -21,7 +21,7 @@ Both produce the same ``VoicePlan``, and everything they decide stays editable.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .textutil import fold
 
@@ -110,29 +110,125 @@ def normalize_section(name: str) -> str:
     return stem + (digits[-1] if digits else "")
 
 
-def build_section_map(layout_sections: list[str], score_sections: list[str]) -> dict[str, str]:
-    """Map layout section labels onto score section names."""
-    mapping: dict[str, str] = {}
-    score_by_key: dict[str, str] = {}
+def section_set(value) -> frozenset:
+    """A section-map entry as a set, whether it was stored as one name or several."""
+    if not value:
+        return frozenset()
+    if isinstance(value, str):
+        return frozenset({value})
+    return frozenset(value)
+
+
+def build_section_map(layout_sections: list[str], score_sections: list[str]) -> dict[str, frozenset]:
+    """Map each layout section label onto the score section(s) it covers.
+
+    A translator writes a repeated section once: one ``Ch`` block for a chorus the
+    score sings three times as ``Chorus 1``, ``Chorus 2`` and ``Chorus 3``. So a
+    label may legitimately cover several score sections, and the value is a set.
+    A label that names its repeat explicitly (``Ch1``) still maps to just that one.
+    """
+    mapping: dict[str, frozenset] = {}
+    by_key: dict[str, list[str]] = {}
+    by_base: dict[str, list[str]] = {}
     for name in score_sections:
-        score_by_key.setdefault(normalize_section(name), name)
+        key = normalize_section(name)
+        by_key.setdefault(key, []).append(name)
+        by_base.setdefault(re.sub(r"\d+$", "", key), []).append(name)
 
     unresolved = []
     for label in layout_sections:
         key = normalize_section(label)
-        if key in score_by_key:
-            mapping[label] = score_by_key[key]
+        if key in by_key:
+            mapping[label] = frozenset(by_key[key])
+        elif key in by_base:
+            # "Ch" with no number covers every numbered chorus in the score.
+            mapping[label] = frozenset(by_base[key])
         else:
             unresolved.append(label)
 
     # Fall back to order when the two documents use different wording.
     if unresolved and len(layout_sections) == len(score_sections):
         for label, name in zip(layout_sections, score_sections):
-            mapping.setdefault(label, name)
+            mapping.setdefault(label, frozenset({name}))
         for label in unresolved:
             index = layout_sections.index(label)
-            mapping[label] = score_sections[index]
+            mapping[label] = frozenset({score_sections[index]})
     return mapping
+
+
+def unroll_to_performance_order(english_lines, section_map, score_sections):
+    """Repeat the layout's blocks into the order the score actually sings them.
+
+    The alignment walks each voice's notes and the layout's syllables forward
+    together, once. That only works if the layout is in performance order. When a
+    layout writes the chorus once but the score sings it three times, the chorus
+    block has to appear three times, in the right places, or every note after the
+    first chorus has nothing left to match against.
+
+    Each repeat is a copy with its own id and ``repeat_of`` pointing at the line
+    the translator actually wrote, so the timeline can tell the repeats apart while
+    the translation still resolves to one edited line. Calling this on a list that
+    has already been unrolled returns it unchanged.
+    """
+    lines = list(english_lines)
+    if not lines or not score_sections:
+        return lines
+    if any(getattr(line, "repeat_of", None) is not None for line in lines):
+        return lines  # already in performance order
+
+    blocks: list[tuple[str, list]] = []
+    for line in lines:
+        if blocks and blocks[-1][0] == line.section:
+            blocks[-1][1].append(line)
+        else:
+            blocks.append((line.section, [line]))
+
+    # A block whose label names no score section travels with the block before it,
+    # so an unlabelled or unrecognised run is never stranded or duplicated.
+    carriers: list[tuple[frozenset, list]] = []
+    for label, block_lines in blocks:
+        names = section_set(section_map.get(label))
+        if names or not carriers:
+            carriers.append((names, list(block_lines)))
+        else:
+            carriers[-1][1].extend(block_lines)
+
+    if not any(len(names) > 1 for names, _ in carriers):
+        return lines  # nothing repeats; the document is already in order
+
+    next_id = max(line.id for line in lines) + 1
+    seen: set[int] = set()
+    out: list = []
+    for name in score_sections:
+        for names, block_lines in carriers:
+            if name not in names:
+                continue
+            for line in block_lines:
+                if line.id not in seen:
+                    seen.add(line.id)
+                    out.append(line)
+                    continue
+                copy = replace(line, id=next_id, repeat_of=line.repeat_of or line.id)
+                next_id += 1
+                out.append(copy)
+    leftover = [
+        line
+        for names, block_lines in carriers
+        if not names
+        for line in block_lines
+        if line.id not in seen
+    ]
+    return (out + leftover) if out else lines
+
+
+def expand_translation(translation: dict, english_lines) -> dict:
+    """Give every repeated copy of a layout line the same translated syllables."""
+    out = dict(translation)
+    for line in english_lines:
+        origin = getattr(line, "repeat_of", None)
+        if origin is not None and line.id not in out and origin in translation:
+            out[line.id] = translation[origin]
+    return out
 
 
 # --------------------------------------------------------------------------- voices
@@ -291,7 +387,7 @@ def map_voice_to_layout(
     right: list[tuple] = []
     running = 0
     for line in english_lines:
-        section = section_map.get(line.section, line.section)
+        section = section_set(section_map.get(line.section, line.section))
         bonus = _tag_bonus(line.tag, voice)
         for index, token in enumerate(line.tokens):
             right.append((fold(token), section, bonus, line.id, index, running))
@@ -310,10 +406,10 @@ def map_voice_to_layout(
         current[0] = previous[0] + NOTE_WITH_NO_WORD
         moves[i][0] = 1
         for j in range(1, cols + 1):
-            other, other_section, bonus, _, _, position = right[j - 1]
+            other, other_sections, bonus, _, _, position = right[j - 1]
             score = _word_score(word, other) + bonus
-            if sections and other_section and any(sections):
-                score += SECTION_AGREES if other_section in sections else SECTION_DISAGREES
+            if sections and other_sections and any(sections):
+                score += SECTION_AGREES if (other_sections & sections) else SECTION_DISAGREES
             if want is not None:
                 drift = abs(position - want) - TIMELINE_FREE
                 if drift > 0:
@@ -476,6 +572,18 @@ def align_voice_by_text(
     )
 
 
+def prepare_layout(english_lines, translation, section_map, score_doc):
+    """Put the layout in performance order and extend the translation to the repeats.
+
+    Every caller must run this once before aligning, and pass the list it returns
+    to both ``reference_timeline`` and ``align_voice_by_text``: the timeline's
+    positions are indexes into this exact list. It is safe to call twice.
+    """
+    order = [name for *_, name in score_doc.sections]
+    lines = unroll_to_performance_order(english_lines, section_map, order)
+    return lines, expand_translation(translation or {}, lines)
+
+
 def reference_timeline(score_doc, english_lines, section_map, voices=None) -> dict:
     """Align the busiest voice on its own, and use it as the clock for the rest."""
     grouped = score_doc.lines_by_voice()
@@ -491,6 +599,9 @@ def reference_timeline(score_doc, english_lines, section_map, voices=None) -> di
 def align_all_by_text(score_doc, english_lines, translation, section_map, voices=None):
     grouped = score_doc.lines_by_voice()
     targets = voices if voices is not None else score_doc.voices
+    english_lines, translation = prepare_layout(
+        english_lines, translation, section_map, score_doc
+    )
     timeline = reference_timeline(score_doc, english_lines, section_map, voices)
     plans: dict[str, VoicePlan] = {}
     for voice in targets:

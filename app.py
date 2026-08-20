@@ -2,8 +2,9 @@
 
 Writes a translated syllable layout under the notes of an engraved vocal score.
 
-Everything it works out is shown back to you and can be corrected before the
-PDF is made.
+The interface is five numbered steps. Each step answers one question, says
+whether anything needs attention, and lists exactly which rows to look at
+before showing the full editable table.
 """
 
 from __future__ import annotations
@@ -28,6 +29,9 @@ STYLE_OPTIONS = [
     "Only page text (ignore comments)",
 ]
 
+ICONS = {"ok": "✓", "warn": "!", "err": "✕", "todo": "○"}
+COLOURS = {"ok": "green", "warn": "orange", "err": "red", "todo": "gray"}
+
 
 # --------------------------------------------------------------------------- caching
 
@@ -47,7 +51,7 @@ def geometry_cached(_score_doc, blank: bytes, key: str):
     return render_mod.check_geometry(_score_doc, blank)
 
 
-@st.cache_data(show_spinner="Working out how each layout is written...")
+@st.cache_data(show_spinner="Working out how the layout is written...")
 def style_cached(_layout_doc, _score_doc, _english_lines, key: str):
     return aligner.choose_style(_layout_doc, _score_doc, STYLE_OPTIONS, _english_lines)
 
@@ -73,12 +77,16 @@ def digest(*chunks: bytes) -> str:
 
 
 def reset_edits(token: str) -> None:
+    """A new set of files means every correction from the last one is stale."""
     if st.session_state.get("_files") != token:
         st.session_state["_files"] = token
         for key in ("layout_edits", "english_edits", "pair_overrides", "assign_edits"):
             st.session_state[key] = {}
         st.session_state["skip_voices"] = []
         st.session_state["dropped_layout"] = set()
+        for key in [k for k in st.session_state if k.startswith("secmap_")]:
+            del st.session_state[key]
+        st.session_state.pop("layout_style", None)
         st.session_state.pop("result_pdf", None)
 
 
@@ -93,12 +101,37 @@ for key, default in [
     st.session_state.setdefault(key, default)
 
 
-# --------------------------------------------------------------------------- uploads
+# --------------------------------------------------------------------------- shared UI
+
+
+def step_header(number: int, title: str, question: str) -> None:
+    """Every step opens the same way: what it is, and the one question it answers."""
+    st.subheader(f"Step {number} · {title}")
+    st.markdown(f"**{question}**")
+
+
+def verdict(count: int, clean: str, todo: str) -> None:
+    """One banner per step: either nothing to do, or exactly what to do."""
+    if count:
+        st.warning(f"**{count} to check.**  {todo}")
+    else:
+        st.success(f"**Nothing to fix here.**  {clean}")
+
+
+def attention_table(rows: list[dict], caption: str) -> None:
+    """The specific rows to look at, before the full table below."""
+    if not rows:
+        return
+    st.markdown(f"**{caption}**")
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width='stretch')
+
+
+# --------------------------------------------------------------------------- files
 
 st.title("Multi-lingual Sheet Music Generator")
 
 with st.sidebar:
-    st.header("Your files")
+    st.header("Your four files")
     english_file = st.file_uploader("1. English score", type=["pdf"], key="english")
     blank_file = st.file_uploader("2. Same score, no lyrics", type=["pdf"], key="blank")
     layout_file = st.file_uploader("3. Translated syllable layout", type=["pdf"], key="layout")
@@ -107,22 +140,34 @@ with st.sidebar:
     )
 
     st.divider()
-    st.header("Placement")
+    st.header("How the syllables look")
     max_size = st.slider("Maximum text size", 4.0, 12.0, 7.25, 0.25)
     baseline = st.slider("Distance below the staff", 3.0, 14.0, 7.6, 0.1)
     font_choice = st.selectbox("Font", list(render_mod.BUNDLED_FONTS), index=0)
 
-if not (english_file and blank_file and layout_file and english_layout_file):
+uploaded = {
+    "1. English score": (english_file, "The engraving with the English lyrics under the notes"),
+    "2. Same score, no lyrics": (blank_file, "The identical engraving with the lyrics removed"),
+    "3. Translated syllable layout": (layout_file, "The translator's document"),
+    "4. English syllable layout": (english_layout_file, "The same document before translation"),
+}
+
+if not all(handle for handle, _ in uploaded.values()):
     st.info("Upload all four files in the sidebar to begin.")
-    st.markdown(
-        """
-        | File | What it is |
-        | --- | --- |
-        | 1. English score | The engraved score with the English lyrics under the notes |
-        | 2. Same score, no lyrics | The identical engraving with the lyrics removed — this is the canvas |
-        | 3. Translated syllable layout | The translator's document: the translated syllables, line by line |
-        | 4. English syllable layout | The *same* document before translation, still in English |
-        """
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "": ICONS["ok"] if handle else ICONS["todo"],
+                    "File": name,
+                    "What it is": description,
+                    "Status": "uploaded" if handle else "still needed",
+                }
+                for name, (handle, description) in uploaded.items()
+            ]
+        ),
+        hide_index=True,
+        width='stretch',
     )
     st.stop()
 
@@ -135,121 +180,187 @@ reset_edits(digest(english_bytes, blank_bytes, layout_bytes, english_layout_byte
 try:
     score_doc = parse_score_cached(english_bytes)
 except Exception as error:  # noqa: BLE001
-    st.error(f"The English score could not be read.\n\n{error}")
+    st.error(f"**File 1, the English score, could not be read.**\n\n{error}")
     st.stop()
 
 try:
     layout_doc = parse_layout_cached(layout_bytes)
 except Exception as error:  # noqa: BLE001
-    st.error(f"The translated syllable layout could not be read.\n\n{error}")
+    st.error(f"**File 3, the translated syllable layout, could not be read.**\n\n{error}")
     st.stop()
 
-english_layout_doc = None
-if english_layout_bytes:
-    try:
-        english_layout_doc = parse_layout_cached(english_layout_bytes)
-    except Exception as error:  # noqa: BLE001
-        st.error(
-            "The English syllable layout could not be read, so the app has fallen back to "
-            f"matching by syllable count.\n\n{error}"
-        )
+try:
+    english_layout_doc = parse_layout_cached(english_layout_bytes)
+except Exception as error:  # noqa: BLE001
+    st.error(f"**File 4, the English syllable layout, could not be read.**\n\n{error}")
+    st.stop()
 
-use_text_matching = english_layout_doc is not None
 geometry_problems = geometry_cached(score_doc, blank_bytes, digest(english_bytes, blank_bytes))
-
 score_sections = [name for _, _, _, name in score_doc.sections]
 
-tab_names = ["Overview", "Layout lines"]
-if use_text_matching:
-    tab_names.append("English ↔ translation")
-tab_names += ["Matching", "Generate"]
-tabs = st.tabs(tab_names)
-tab_overview, tab_lines = tabs[0], tabs[1]
-tab_pairs = tabs[2] if use_text_matching else None
-tab_match, tab_make = tabs[-2], tabs[-1]
 
-# --------------------------------------------------------------------------- overview
+# --------------------------------------------------------------------------- the pipeline
+#
+# Everything is worked out before anything is drawn, so each tab can be labelled
+# with what it found. Corrections made in the tables live in session state, so
+# they are already folded in by the time this runs on the next interaction.
 
-with tab_overview:
-    columns = st.columns(3 if use_text_matching else 2)
-    with columns[0]:
-        st.subheader("The score")
-        st.metric("Pages", score_doc.page_count)
-        st.metric("Voice parts", len(score_doc.voices))
-        st.metric("Syllable positions", len(score_doc.anchors))
-        st.write("**Sections**")
-        st.write(", ".join(score_sections) if score_sections else "_none found_")
-        st.write("**Voices**")
-        st.write(", ".join(score_doc.voices))
-    with columns[1]:
-        st.subheader("The translation")
-        st.metric("Syllable lines", len(layout_doc.lyric_lines()))
-        st.metric("Sections", len(layout_doc.sections))
-        st.write("**Sections**")
-        st.write(", ".join(layout_doc.sections) if layout_doc.sections else "_none found_")
-    if use_text_matching:
-        with columns[2]:
-            st.subheader("The English layout")
-            st.metric("Syllable lines", len(english_layout_doc.lyric_lines()))
-            st.metric("Sections", len(english_layout_doc.sections))
-            st.write("**Sections**")
-            st.write(
-                ", ".join(english_layout_doc.sections)
-                if english_layout_doc.sections
-                else "_none found_"
-            )
+english_style, _ = style_cached(
+    english_layout_doc, score_doc, None, digest(english_bytes, english_layout_bytes)
+)
+english_lines = layout_mod.to_editable(
+    english_layout_doc, english_style, st.session_state["english_edits"]
+)
 
+suggested_style, style_scores = best_translation_style(
+    english_lines, layout_doc, digest(english_layout_bytes, layout_bytes)
+)
+style = st.session_state.get("layout_style", suggested_style)
+
+editable_lines = layout_mod.to_editable(layout_doc, style, st.session_state["layout_edits"])
+working_lines = [
+    line for line in editable_lines if line.id not in st.session_state["dropped_layout"]
+]
+
+pair_result = pairing_mod.pair_layouts(english_lines, working_lines)
+pairs = pair_result.pairs
+translation = pairing_mod.translation_map(
+    pairs, working_lines, st.session_state["pair_overrides"]
+)
+
+ordered_sections: list[str] = []
+for line in english_lines:
+    if line.section and line.section not in ordered_sections:
+        ordered_sections.append(line.section)
+
+default_map = aligner.build_section_map(ordered_sections, score_sections)
+section_map: dict[str, frozenset] = {}
+for label in ordered_sections:
+    guess = [n for n in score_sections if n in aligner.section_set(default_map.get(label))]
+    chosen = st.session_state.get(f"secmap_{label}", guess)
+    if chosen:
+        section_map[label] = frozenset(chosen)
+
+unmapped_sections = [label for label in ordered_sections if label not in section_map]
+
+skip = st.session_state["skip_voices"]
+active_voices = [v for v in score_doc.voices if v not in skip]
+grouped = score_doc.lines_by_voice()
+
+# A section the layout writes once may be sung several times, so the layout is first
+# repeated into the order the score actually sings it. The timeline's positions are
+# indexes into that list, so both steps below must be given the same one.
+aligned_lines, aligned_translation = aligner.prepare_layout(
+    english_lines, translation, section_map, score_doc
+)
+timeline = aligner.reference_timeline(score_doc, aligned_lines, section_map)
+
+plans: dict[str, aligner.VoicePlan] = {}
+for voice_name in active_voices:
+    voice_lines = grouped.get(voice_name, [])
+    if voice_lines:
+        plans[voice_name] = aligner.align_voice_by_text(
+            voice_name, voice_lines, aligned_lines, aligned_translation, section_map, timeline
+        )
+
+
+def edited_tokens(voice_name: str, assignment) -> list[str]:
+    """The syllables for one score line, including anything typed over them."""
+    override = st.session_state["assign_edits"].get(f"{voice_name}||{assignment.score_line_id}")
+    return override.split() if override is not None else list(assignment.tokens)
+
+
+# --------------------------------------------------------------------------- what needs doing
+
+layout_trouble = [
+    line for line in working_lines if not line.tokens or line.note_count == 0
+]
+pair_trouble = [pair for pair in pairs if pair.status != "ok"]
+mismatched_lines = []
+empty_notes = 0
+for voice_name, voice_plan in plans.items():
+    for assignment in voice_plan.assignments:
+        tokens = edited_tokens(voice_name, assignment)
+        need = len(assignment.tokens)
+        empty_notes += sum(1 for index in range(need) if index >= len(tokens) or not tokens[index])
+        if len(tokens) != need:
+            mismatched_lines.append((voice_name, assignment, len(tokens), need))
+
+score_state = "err" if geometry_problems else ("warn" if score_doc.warnings else "ok")
+layout_state = "warn" if layout_trouble else "ok"
+pair_state = "warn" if pair_trouble else "ok"
+notes_state = "warn" if (mismatched_lines or empty_notes or unmapped_sections) else "ok"
+ready_state = "ok" if st.session_state.get("result_pdf") else "todo"
+
+steps = [
+    ("Score", score_state),
+    ("Syllables", layout_state),
+    ("Translation", pair_state),
+    ("Notes", notes_state),
+    ("PDF", ready_state),
+]
+tabs = st.tabs([f"{ICONS[state]}  {i} · {name}" for i, (name, state) in enumerate(steps, 1)])
+tab_score, tab_lines, tab_pairs, tab_match, tab_make = tabs
+
+
+# --------------------------------------------------------------------------- 1 · Score
+
+with tab_score:
+    step_header(1, "Score", "Did the app read your two score PDFs correctly?")
+    verdict(
+        len(geometry_problems),
+        "The two scores are the same engraving, so every syllable will land on a note.",
+        "The scores below do not line up. Syllables cannot be placed until this is fixed.",
+    )
     for problem in geometry_problems:
         st.error(problem)
-    warnings = list(score_doc.warnings) + list(layout_doc.warnings)
-    if english_layout_doc:
-        warnings += [f"English layout: {w}" for w in english_layout_doc.warnings]
-    for warning in warnings:
-        st.warning(warning)
-    if not geometry_problems:
-        st.caption("The two scores are the same engraving, so syllables will land on the notes.")
 
-# --------------------------------------------------------------------------- layout lines
+    left, middle, right = st.columns(3)
+    with left:
+        st.markdown("**The score**")
+        st.metric("Pages", score_doc.page_count)
+        st.metric("Voice parts", len(score_doc.voices))
+        st.metric("Notes to fill", len(score_doc.anchors))
+    with middle:
+        st.markdown("**Read from the score**")
+        st.write("Sections")
+        st.write(", ".join(score_sections) if score_sections else "_none found_")
+        st.write("Voices")
+        st.write(", ".join(score_doc.voices))
+    with right:
+        st.markdown("**Read from the layouts**")
+        st.metric("English lines", len(english_lines))
+        st.metric("Translated lines", len(working_lines))
 
-english_lines: list = []
+    warnings = list(score_doc.warnings)
+    warnings += [f"Translated layout: {w}" for w in layout_doc.warnings]
+    warnings += [f"English layout: {w}" for w in english_layout_doc.warnings]
+    if warnings:
+        st.markdown("**Worth knowing**")
+        for warning in warnings:
+            st.warning(warning)
+
+
+# --------------------------------------------------------------------------- 2 · Syllables
 
 with tab_lines:
-    if use_text_matching:
-        english_style, _ = style_cached(
-            english_layout_doc, score_doc, None, digest(english_bytes, english_layout_bytes)
-        )
-        english_lines = layout_mod.to_editable(
-            english_layout_doc, english_style, st.session_state["english_edits"]
-        )
-        style, style_scores = best_translation_style(
-            english_lines, layout_doc, digest(english_layout_bytes, layout_bytes)
-        )
-        st.caption(
-            "Reading of the translated layout chosen by pairing each option against the English "
-            "layout: " + " | ".join(f"{k}: {v:.0%}" for k, v in style_scores.items())
-        )
-    else:
-        style, style_scores = style_cached(
-            layout_doc, score_doc, None, digest(english_bytes, layout_bytes)
-        )
-
-    st.subheader("Check the translated lines")
-    st.caption(
-        "One box per note. To sing two syllables on one note, delete the space between them. "
-        "To split them again, add a space. Untick a row to leave it out entirely."
+    step_header(2, "Syllables", "Did the app read the translator's document correctly?")
+    verdict(
+        len(layout_trouble),
+        "Every line in the translated layout was read as a row of syllables.",
+        "These lines came through empty. Type the syllables in, or untick Use to leave them out.",
+    )
+    attention_table(
+        [{"Page": line.page + 1, "Section": line.section, "Line": line.text or "(empty)"}
+         for line in layout_trouble],
+        "Lines to look at",
     )
 
-    style = st.radio(
-        "Where is the translation in this layout?",
-        STYLE_OPTIONS,
-        index=STYLE_OPTIONS.index(style),
-        horizontal=True,
+    st.markdown("---")
+    st.markdown(
+        "**One box per note.** Delete the space between two syllables to sing them on one "
+        "note; add a space to split them again. Untick **Use** to leave a line out."
     )
-
-    editable = layout_mod.to_editable(layout_doc, style, st.session_state["layout_edits"])
-    if not editable:
-        st.error("That choice leaves no lines. Pick a different option above.")
-        st.stop()
 
     frame = pd.DataFrame(
         [
@@ -260,25 +371,29 @@ with tab_lines:
                 "Tag": line.tag,
                 "Notes": line.note_count,
                 "Syllables": line.text,
-                "Box applied": "yes" if line.inferred_join else "",
+                "Joined": "yes" if line.inferred_join else "",
                 "_id": line.id,
             }
-            for line in editable
+            for line in editable_lines
         ]
     )
     edited = st.data_editor(
         frame,
         hide_index=True,
-        use_container_width=True,
+        width='stretch',
         height=420,
         column_config={
             "Use": st.column_config.CheckboxColumn(width="small"),
             "Page": st.column_config.NumberColumn(width="small", disabled=True),
             "Section": st.column_config.TextColumn(width="small"),
             "Tag": st.column_config.TextColumn(width="small"),
-            "Notes": st.column_config.NumberColumn(width="small", disabled=True),
+            "Notes": st.column_config.NumberColumn(
+                width="small", disabled=True, help="How many notes these syllables cover"
+            ),
             "Syllables": st.column_config.TextColumn(width="large"),
-            "Box applied": st.column_config.TextColumn(width="small", disabled=True),
+            "Joined": st.column_config.TextColumn(
+                width="small", disabled=True, help="A box in the PDF joined syllables onto one note"
+            ),
             "_id": None,
         },
         key="layout_editor",
@@ -286,264 +401,272 @@ with tab_lines:
 
     changed = 0
     for _, row in edited.iterrows():
-        original = next(l for l in editable if l.id == row["_id"])
+        original = next(l for l in editable_lines if l.id == row["_id"])
         if row["Syllables"] != original.text:
             st.session_state["layout_edits"][int(row["_id"])] = row["Syllables"]
             changed += 1
+        original.section = str(row["Section"] or "")
+        original.tag = str(row["Tag"] or "")
     st.session_state["dropped_layout"] = {
         int(r["_id"]) for _, r in edited.iterrows() if not r["Use"]
     }
     if changed:
-        st.info(f"{changed} line(s) edited. The matching will use your version.")
+        st.info(f"{changed} line(s) edited. Everything after this step uses your version.")
 
-    if use_text_matching:
-        with st.expander("The English layout, as the app read it", expanded=False):
-            st.caption(
-                "Edit a line here only if the app misread the original English document."
-            )
-            english_frame = pd.DataFrame(
+    with st.expander("Advanced — where the translation sits in the document", expanded=False):
+        st.write(
+            "The app tried each way of reading the file and kept whichever matched the English "
+            "layout best. Change it only if the table above is reading the wrong text."
+        )
+        st.dataframe(
+            pd.DataFrame(
                 [
-                    {
-                        "Page": line.page + 1,
-                        "Section": line.section,
-                        "Tag": line.tag,
-                        "Notes": line.note_count,
-                        "Syllables": line.text,
-                        "_id": line.id,
-                    }
-                    for line in english_lines
+                    {"Reading": name, "Match": f"{value:.0%}" if value >= 0 else "no lines found"}
+                    for name, value in style_scores.items()
                 ]
-            )
-            edited_english = st.data_editor(
-                english_frame,
-                hide_index=True,
-                use_container_width=True,
-                height=320,
-                column_config={
-                    "Page": st.column_config.NumberColumn(width="small", disabled=True),
-                    "Section": st.column_config.TextColumn(width="small"),
-                    "Tag": st.column_config.TextColumn(width="small"),
-                    "Notes": st.column_config.NumberColumn(width="small", disabled=True),
-                    "Syllables": st.column_config.TextColumn(width="large"),
-                    "_id": None,
-                },
-                key="english_editor",
-            )
-            for _, row in edited_english.iterrows():
-                original = next(l for l in english_lines if l.id == row["_id"])
-                if row["Syllables"] != original.text:
-                    st.session_state["english_edits"][int(row["_id"])] = row["Syllables"]
+            ),
+            hide_index=True,
+            width='stretch',
+        )
+        st.radio(
+            "Reading to use",
+            STYLE_OPTIONS,
+            index=STYLE_OPTIONS.index(style),
+            key="layout_style",
+            horizontal=True,
+        )
 
-# Rebuild the working line lists from the edits above.
-working_lines = [
-    line
-    for line in layout_mod.to_editable(layout_doc, style, st.session_state["layout_edits"])
-    if line.id not in st.session_state["dropped_layout"]
-]
-edit_lookup = {int(r["_id"]): r for _, r in edited.iterrows()}
-for line in working_lines:
-    row = edit_lookup.get(line.id)
-    if row is not None:
-        line.section = str(row["Section"] or "")
-        line.tag = str(row["Tag"] or "")
-
-if use_text_matching:
-    english_lines = layout_mod.to_editable(
-        english_layout_doc, english_style, st.session_state["english_edits"]
-    )
-
-layout_sections: list[str] = []
-for line in working_lines:
-    if line.section and line.section not in layout_sections:
-        layout_sections.append(line.section)
-
-# --------------------------------------------------------------------------- pairing
-
-pairs: list = []
-translation: dict[int, list[str]] = {}
-
-if use_text_matching:
-    with tab_pairs:
-        st.subheader("English line by English line, what the translation says")
-        result = pairing_mod.pair_layouts(english_lines, working_lines)
-        pairs = result.pairs
-
-        left, right = st.columns([1, 3])
-        with left:
-            st.metric("Lines paired cleanly", f"{result.confidence:.0%}")
-        with right:
-            for note in result.notes:
-                st.warning(note)
-            if not result.notes:
-                st.success(
-                    "Every English line has a translation opposite it with the same number of "
-                    "syllables."
-                )
-
-        pair_frame = pd.DataFrame(
+    with st.expander("Advanced — the English layout, as the app read it", expanded=False):
+        st.write("Edit a line here only if the app misread the original English document.")
+        english_frame = pd.DataFrame(
             [
                 {
-                    "Section": pair.section,
-                    "Tag": pair.tag,
-                    "English": pair.english_text or "—",
-                    "Notes": pair.english_count,
-                    "Translation": (
-                        st.session_state["pair_overrides"].get(
-                            pair.english_id, pair.translated_text
-                        )
-                        if pair.english_id is not None
-                        else pair.translated_text
-                    ),
-                    "Given": pair.translated_count,
-                    "Status": {
-                        "ok": "",
-                        "count": "syllable counts differ",
-                        "english-only": "no translation",
-                        "translation-only": "no English",
-                    }[pair.status],
-                    "_eid": -1 if pair.english_id is None else pair.english_id,
+                    "Page": line.page + 1,
+                    "Section": line.section,
+                    "Tag": line.tag,
+                    "Notes": line.note_count,
+                    "Syllables": line.text,
+                    "_id": line.id,
                 }
-                for pair in pairs
+                for line in english_lines
             ]
         )
-        edited_pairs = st.data_editor(
-            pair_frame,
+        edited_english = st.data_editor(
+            english_frame,
             hide_index=True,
-            use_container_width=True,
-            height=460,
+            width='stretch',
+            height=320,
             column_config={
-                "Section": st.column_config.TextColumn(width="small", disabled=True),
-                "Tag": st.column_config.TextColumn(width="small", disabled=True),
-                "English": st.column_config.TextColumn(width="large", disabled=True),
+                "Page": st.column_config.NumberColumn(width="small", disabled=True),
+                "Section": st.column_config.TextColumn(width="small"),
+                "Tag": st.column_config.TextColumn(width="small"),
                 "Notes": st.column_config.NumberColumn(width="small", disabled=True),
-                "Translation": st.column_config.TextColumn(width="large"),
-                "Given": st.column_config.NumberColumn(width="small", disabled=True),
-                "Status": st.column_config.TextColumn(width="medium", disabled=True),
-                "_eid": None,
+                "Syllables": st.column_config.TextColumn(width="large"),
+                "_id": None,
             },
-            key="pair_editor",
+            key="english_editor",
         )
-        for _, row in edited_pairs.iterrows():
-            eid = int(row["_eid"])
-            if eid < 0:
-                continue
-            original = next((p for p in pairs if p.english_id == eid), None)
-            if original is not None and row["Translation"] != original.translated_text:
-                st.session_state["pair_overrides"][eid] = row["Translation"]
+        for _, row in edited_english.iterrows():
+            original = next(l for l in english_lines if l.id == row["_id"])
+            if row["Syllables"] != original.text:
+                st.session_state["english_edits"][int(row["_id"])] = row["Syllables"]
 
-        st.caption(
-            "Type over anything in the Translation column to correct it. Where the two counts "
-            "differ, join two syllables by deleting the space between them or split one by "
-            "adding a space."
-        )
 
-    translation = pairing_mod.translation_map(
-        pairs, working_lines, st.session_state["pair_overrides"]
+# --------------------------------------------------------------------------- 3 · Translation
+
+STATUS_TEXT = {
+    "ok": "",
+    "count": "counts differ",
+    "english-only": "no translation",
+    "translation-only": "no English line",
+}
+
+with tab_pairs:
+    step_header(3, "Translation", "Is each English line sitting beside the right translation?")
+    verdict(
+        len(pair_trouble),
+        "Every English line has a translation opposite it with the same number of syllables.",
+        "Check the rows below. Where the counts differ, join two syllables by deleting the "
+        "space between them, or split one by adding a space.",
+    )
+    attention_table(
+        [
+            {
+                "Section": pair.section,
+                "English": pair.english_text or "—",
+                "Notes": pair.english_count,
+                "Translation": pair.translated_text or "—",
+                "Syllables": pair.translated_count,
+                "Issue": STATUS_TEXT[pair.status],
+            }
+            for pair in pair_trouble
+        ],
+        "Lines to look at",
+    )
+    for note in pair_result.notes:
+        st.info(note)
+
+    st.markdown("---")
+    st.markdown(
+        f"**{pair_result.confidence:.0%} of lines paired cleanly.** "
+        "Type over anything in the **Translation** column to correct it."
     )
 
-# --------------------------------------------------------------------------- matching
+    pair_frame = pd.DataFrame(
+        [
+            {
+                "": ICONS["ok"] if pair.status == "ok" else ICONS["warn"],
+                "Section": pair.section,
+                "Tag": pair.tag,
+                "English": pair.english_text or "—",
+                "Notes": pair.english_count,
+                "Translation": (
+                    st.session_state["pair_overrides"].get(pair.english_id, pair.translated_text)
+                    if pair.english_id is not None
+                    else pair.translated_text
+                ),
+                "Syllables": pair.translated_count,
+                "_eid": -1 if pair.english_id is None else pair.english_id,
+            }
+            for pair in pairs
+        ]
+    )
+    edited_pairs = st.data_editor(
+        pair_frame,
+        hide_index=True,
+        width='stretch',
+        height=460,
+        column_config={
+            "": st.column_config.TextColumn(width="small", disabled=True),
+            "Section": st.column_config.TextColumn(width="small", disabled=True),
+            "Tag": st.column_config.TextColumn(width="small", disabled=True),
+            "English": st.column_config.TextColumn(width="large", disabled=True),
+            "Notes": st.column_config.NumberColumn(
+                width="small", disabled=True, help="Notes this line has in the score"
+            ),
+            "Translation": st.column_config.TextColumn(width="large"),
+            "Syllables": st.column_config.NumberColumn(
+                width="small", disabled=True, help="Syllables the translator wrote"
+            ),
+            "_eid": None,
+        },
+        key="pair_editor",
+    )
+    for _, row in edited_pairs.iterrows():
+        eid = int(row["_eid"])
+        if eid < 0:
+            continue
+        original = next((p for p in pairs if p.english_id == eid), None)
+        if original is not None and row["Translation"] != original.translated_text:
+            st.session_state["pair_overrides"][eid] = row["Translation"]
+
+
+# --------------------------------------------------------------------------- 4 · Notes
 
 with tab_match:
-    st.subheader("Where every syllable is going")
-
-    source_sections = (
-        [line.section for line in english_lines if line.section]
-        if use_text_matching
-        else layout_sections
+    step_header(4, "Notes", "Is every note getting the syllable it should?")
+    verdict(
+        len(mismatched_lines) + len(unmapped_sections) + (1 if empty_notes else 0),
+        "Every note has a syllable on it and every section is accounted for.",
+        f"{empty_notes} note(s) would be left empty. Pick the voice below and type the "
+        "syllables in — you can still make the PDF either way.",
     )
-    ordered_sections: list[str] = []
-    for name in source_sections:
-        if name not in ordered_sections:
-            ordered_sections.append(name)
 
-    with st.expander("How sections line up", expanded=False):
-        default_map = aligner.build_section_map(ordered_sections, score_sections)
-        choices = ["(ignore)"] + score_sections
-        section_map: dict[str, str] = {}
+    if unmapped_sections:
+        st.error(
+            "**Not every section is placed:** "
+            + ", ".join(f"`{name}`" for name in unmapped_sections)
+            + ". Open *Which part of the score each section is sung in* below and tick where "
+            "each one belongs."
+        )
+
+    attention_table(
+        [
+            {
+                "Voice": voice_name,
+                "Page": assignment.page + 1,
+                "Section": assignment.section,
+                "English in the score": assignment.english,
+                "Notes": need,
+                "Syllables given": given,
+            }
+            for voice_name, assignment, given, need in mismatched_lines[:25]
+        ],
+        "Lines to look at",
+    )
+    if len(mismatched_lines) > 25:
+        st.caption(f"...and {len(mismatched_lines) - 25} more.")
+
+    st.markdown("---")
+
+    with st.expander(
+        "Which part of the score each section is sung in",
+        expanded=bool(unmapped_sections),
+    ):
+        st.write(
+            "A section written once in the layout can be sung several times in the score — one "
+            "**Ch** block covering Chorus 1, 2 and 3. Tick every place it is sung."
+        )
         if ordered_sections:
-            grid = st.columns(min(4, len(ordered_sections)))
+            grid = st.columns(min(3, len(ordered_sections)))
             for index, label in enumerate(ordered_sections):
                 with grid[index % len(grid)]:
-                    guess = default_map.get(label)
-                    section_map[label] = st.selectbox(
-                        label,
-                        choices,
-                        index=choices.index(guess) if guess in choices else 0,
-                        key=f"secmap_{label}",
+                    key = f"secmap_{label}"
+                    extra = (
+                        {}
+                        if key in st.session_state
+                        else {
+                            "default": [
+                                n
+                                for n in score_sections
+                                if n in aligner.section_set(default_map.get(label))
+                            ]
+                        }
                     )
-        section_map = {k: v for k, v in section_map.items() if v != "(ignore)"}
+                    st.multiselect(label, score_sections, key=key, **extra)
 
-    skip = st.multiselect(
+    st.multiselect(
         "Voices to leave in English",
         score_doc.voices,
-        default=st.session_state["skip_voices"],
+        key="skip_voices",
         help="Anything selected here is skipped entirely and keeps no lyrics.",
     )
-    st.session_state["skip_voices"] = skip
-    active_voices = [v for v in score_doc.voices if v not in skip]
-
-    grouped = score_doc.lines_by_voice()
-    # The busiest voice is aligned first and used as a clock for all the others,
-    # so a part repeating a line the lead has already sung is placed by *when* it
-    # sings it. Built from every voice, including any left in English.
-    timeline = (
-        aligner.reference_timeline(score_doc, english_lines, section_map)
-        if use_text_matching
-        else {}
-    )
-    plans: dict[str, aligner.VoicePlan] = {}
-    for voice in active_voices:
-        lines = grouped.get(voice, [])
-        if not lines:
-            continue
-        if use_text_matching:
-            plans[voice] = aligner.align_voice_by_text(
-                voice, lines, english_lines, translation, section_map, timeline
-            )
-        else:
-            plans[voice] = aligner.align_voice(voice, lines, working_lines, section_map)
 
     if not plans:
         st.error("Every voice has been left in English. Untick one above to continue.")
         st.stop()
 
-    summary = pd.DataFrame(
-        [
-            {
-                "Voice": plan.voice,
-                "Lines": plan.total,
-                "Clean": plan.matched,
-                "Needs a look": plan.total - plan.matched,
-                "Notes filled": f"{plan.covered}/{plan.notes_total}",
-                "Coverage": plan.coverage,
-            }
-            for plan in plans.values()
-        ]
-    )
+    st.markdown("**Every voice at a glance**")
     st.dataframe(
-        summary,
+        pd.DataFrame(
+            [
+                {
+                    "": ICONS["ok"] if plan.covered == plan.notes_total else ICONS["warn"],
+                    "Voice": plan.voice,
+                    "Lines": plan.total,
+                    "Notes filled": f"{plan.covered} / {plan.notes_total}",
+                    "Coverage": round(plan.coverage * 100),
+                }
+                for plan in plans.values()
+            ]
+        ),
         hide_index=True,
-        use_container_width=True,
+        width='stretch',
         column_config={
+            "": st.column_config.TextColumn(width="small"),
             "Coverage": st.column_config.ProgressColumn(
-                "Coverage", min_value=0.0, max_value=1.0, format="%.0f%%"
-            )
+                "Coverage", min_value=0, max_value=100, format="%d%%"
+            ),
         },
     )
 
-    trouble = int(summary["Needs a look"].sum())
-    empty = sum(plan.notes_total - plan.covered for plan in plans.values())
-    if trouble:
-        st.warning(
-            f"{trouble} line(s) are not completely matched and {empty} note(s) would be left "
-            "empty. Open the voice below and type the syllables in — you can still generate the "
-            "PDF either way."
-        )
-    else:
-        st.success("Every note has a syllable on it. Have a look through, then go to Generate.")
-
-    voice = st.selectbox("Voice to review", list(plans), key="review_voice")
+    st.markdown("---")
+    voice = st.selectbox("Voice to review line by line", list(plans), key="review_voice")
     plan = plans[voice]
+    st.markdown(
+        "**The English printed in the score, and the syllables going onto those same notes.** "
+        "Type over the Syllables column to change anything."
+    )
 
     rows = []
     for assignment in plan.assignments:
@@ -552,27 +675,29 @@ with tab_match:
         text = override if override is not None else " ".join(assignment.tokens)
         rows.append(
             {
+                "": ICONS["ok"] if len(text.split()) == len(assignment.tokens) else ICONS["warn"],
                 "Page": assignment.page + 1,
                 "Section": assignment.section,
                 "English in the score": assignment.english,
                 "Notes": len(assignment.tokens),
                 "Syllables": text,
-                "Status": assignment.status,
                 "_key": key,
             }
         )
     edited_voice = st.data_editor(
         pd.DataFrame(rows),
         hide_index=True,
-        use_container_width=True,
+        width='stretch',
         height=430,
         column_config={
+            "": st.column_config.TextColumn(width="small", disabled=True),
             "Page": st.column_config.NumberColumn(width="small", disabled=True),
             "Section": st.column_config.TextColumn(width="small", disabled=True),
             "English in the score": st.column_config.TextColumn(width="large", disabled=True),
-            "Notes": st.column_config.NumberColumn(width="small", disabled=True),
+            "Notes": st.column_config.NumberColumn(
+                width="small", disabled=True, help="Notes on this line of the score"
+            ),
             "Syllables": st.column_config.TextColumn(width="large"),
-            "Status": st.column_config.TextColumn(width="small", disabled=True),
             "_key": None,
         },
         key=f"voice_editor_{voice}",
@@ -580,67 +705,68 @@ with tab_match:
     for _, row in edited_voice.iterrows():
         st.session_state["assign_edits"][row["_key"]] = row["Syllables"]
 
-    problems = [
-        (row["Page"], len(str(row["Syllables"]).split()), row["Notes"])
-        for _, row in edited_voice.iterrows()
-        if len(str(row["Syllables"]).split()) != row["Notes"]
-    ]
-    if problems:
-        st.error(
-            f"{len(problems)} line(s) have the wrong number of syllables for their notes. "
-            "Join two by deleting the space between them, or split one by adding a space."
-        )
-        st.dataframe(
-            pd.DataFrame(problems, columns=["Page", "Syllables given", "Notes available"]),
-            hide_index=True,
-        )
-
-    notes_for_lines = [a.note for a in plan.assignments if a.note]
-    if notes_for_lines:
+    unresolved = [a.note for a in plan.assignments if a.note]
+    if unresolved:
         with st.expander(f"What the app could not work out for {voice}", expanded=False):
-            for text in dict.fromkeys(notes_for_lines):
+            for text in dict.fromkeys(unresolved):
                 st.write("- " + text)
 
-# --------------------------------------------------------------------------- generate
+
+# --------------------------------------------------------------------------- 5 · PDF
 
 with tab_make:
-    st.subheader("Make the PDF")
+    step_header(5, "PDF", "Make the finished score.")
 
     placements: dict[int, list[str]] = {}
-    issues: list[str] = []
+    issues: list[dict] = []
     for voice_name, voice_plan in plans.items():
         for assignment in voice_plan.assignments:
-            key = f"{voice_name}||{assignment.score_line_id}"
-            text = st.session_state["assign_edits"].get(key)
-            tokens = text.split() if text is not None else list(assignment.tokens)
+            tokens = edited_tokens(voice_name, assignment)
             need = len(assignment.tokens)
             if len(tokens) > need:
                 issues.append(
-                    f"{voice_name}, page {assignment.page + 1}: {len(tokens)} syllables for "
-                    f"{need} notes — the extra ones were left off."
+                    {
+                        "Voice": voice_name,
+                        "Page": assignment.page + 1,
+                        "Notes": need,
+                        "Syllables given": len(tokens),
+                        "What happens": f"the last {len(tokens) - need} will be left off",
+                    }
                 )
                 tokens = tokens[:need]
             elif len(tokens) < need:
                 issues.append(
-                    f"{voice_name}, page {assignment.page + 1}: {len(tokens)} syllables for "
-                    f"{need} notes — those notes were left empty."
+                    {
+                        "Voice": voice_name,
+                        "Page": assignment.page + 1,
+                        "Notes": need,
+                        "Syllables given": len(tokens),
+                        "What happens": f"{need - len(tokens)} note(s) will be left empty",
+                    }
                 )
                 tokens = tokens + [""] * (need - len(tokens))
             placements[assignment.score_line_id] = tokens
 
-    blank_notes = sum(1 for tokens in placements.values() for t in tokens if not t)
-    total_notes = sum(len(tokens) for tokens in placements.values())
-    st.metric(
-        "Notes that will carry a syllable",
-        f"{total_notes - blank_notes} of {total_notes}",
-    )
+    blank = sum(1 for tokens in placements.values() for token in tokens if not token)
+    total = sum(len(tokens) for tokens in placements.values())
 
-    for issue in issues[:12]:
-        st.warning(issue)
-    if len(issues) > 12:
-        st.caption(f"...and {len(issues) - 12} more.")
+    left, right = st.columns([1, 2])
+    with left:
+        st.metric("Notes that will carry a syllable", f"{total - blank} of {total}")
+    with right:
+        verdict(
+            len(issues),
+            "Every note will carry a syllable.",
+            "These lines will still be written, with the gaps shown below. "
+            "Go back to Step 4 to fill them, or carry on.",
+        )
 
-    if st.button("Generate the score", type="primary", use_container_width=True):
+    attention_table(issues[:15], "What will not be filled")
+    if len(issues) > 15:
+        st.caption(f"...and {len(issues) - 15} more.")
+
+    st.markdown("---")
+    if st.button("Generate the score", type="primary", width='stretch'):
         try:
             settings = render_mod.RenderSettings(
                 max_size=max_size, baseline_offset=baseline, font_choice=font_choice
@@ -649,41 +775,44 @@ with tab_make:
                 score_doc, blank_bytes, placements, settings
             )
         except Exception as error:  # noqa: BLE001
-            st.error(f"The PDF could not be made.\n\n{error}")
+            st.error(f"**The PDF could not be made.**\n\n{error}")
 
     if st.session_state.get("result_pdf"):
         result = st.session_state["result_pdf"]
-        st.download_button(
-            "Download the finished score",
-            result,
-            "translated_score.pdf",
-            "application/pdf",
-            type="primary",
-            use_container_width=True,
-        )
+        st.success("**Your score is ready.**")
 
-        report = io.StringIO()
-        report.write("voice,page,section,english,syllables\n")
-        for voice_name, voice_plan in plans.items():
-            for assignment in voice_plan.assignments:
-                key = f"{voice_name}||{assignment.score_line_id}"
-                text = st.session_state["assign_edits"].get(key, " ".join(assignment.tokens))
-                english = assignment.english.replace('"', "'")
-                report.write(
-                    f'"{voice_name}",{assignment.page + 1},"{assignment.section}",'
-                    f'"{english}","{text}"\n'
-                )
-        st.download_button(
-            "Download a checking sheet (CSV)",
-            report.getvalue().encode("utf-8"),
-            "alignment_report.csv",
-            "text/csv",
-            use_container_width=True,
-        )
+        first, second = st.columns(2)
+        with first:
+            st.download_button(
+                "Download the finished score (PDF)",
+                result,
+                "translated_score.pdf",
+                "application/pdf",
+                type="primary",
+                width='stretch',
+            )
+        with second:
+            report = io.StringIO()
+            report.write("voice,page,section,english,syllables\n")
+            for voice_name, voice_plan in plans.items():
+                for assignment in voice_plan.assignments:
+                    text = " ".join(edited_tokens(voice_name, assignment))
+                    english = assignment.english.replace('"', "'")
+                    report.write(
+                        f'"{voice_name}",{assignment.page + 1},"{assignment.section}",'
+                        f'"{english}","{text}"\n'
+                    )
+            st.download_button(
+                "Download a checking sheet (CSV)",
+                report.getvalue().encode("utf-8"),
+                "alignment_report.csv",
+                "text/csv",
+                width='stretch',
+            )
 
-        st.write("**Preview**")
+        st.markdown("**Preview**")
         import pymupdf as fitz
 
-        total = fitz.open(stream=result, filetype="pdf").page_count
-        page_pick = st.number_input("Page", 1, total, 1)
-        st.image(render_mod.page_image(result, int(page_pick) - 1, 2.0), use_container_width=True)
+        pages = fitz.open(stream=result, filetype="pdf").page_count
+        page_pick = st.number_input("Page", 1, pages, 1)
+        st.image(render_mod.page_image(result, int(page_pick) - 1, 2.0), width='stretch')
