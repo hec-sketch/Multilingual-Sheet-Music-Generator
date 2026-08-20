@@ -36,27 +36,27 @@ COLOURS = {"ok": "green", "warn": "orange", "err": "red", "todo": "gray"}
 # --------------------------------------------------------------------------- caching
 
 
-@st.cache_data(show_spinner="Reading the score...")
+@st.cache_data(show_spinner="Reading the score...", max_entries=4)
 def parse_score_cached(data: bytes):
     return score_mod.parse_score(data)
 
 
-@st.cache_data(show_spinner="Reading a layout...")
+@st.cache_data(show_spinner="Reading a layout...", max_entries=8)
 def parse_layout_cached(data: bytes):
     return layout_mod.parse_layout(data)
 
 
-@st.cache_data(show_spinner="Checking the two scores match...")
+@st.cache_data(show_spinner="Checking the two scores match...", max_entries=4)
 def geometry_cached(_score_doc, blank: bytes, key: str):
     return render_mod.check_geometry(_score_doc, blank)
 
 
-@st.cache_data(show_spinner="Working out how the layout is written...")
+@st.cache_data(show_spinner="Working out how the layout is written...", max_entries=4)
 def style_cached(_layout_doc, _score_doc, _english_lines, key: str):
     return aligner.choose_style(_layout_doc, _score_doc, STYLE_OPTIONS, _english_lines)
 
 
-@st.cache_data(show_spinner="Pairing the English layout with the translation...")
+@st.cache_data(show_spinner="Pairing the English layout with the translation...", max_entries=4)
 def best_translation_style(_english_lines, _translated_doc, key: str):
     """Pick the reading of the translated layout that pairs best with the English one."""
     results = {}
@@ -76,29 +76,70 @@ def digest(*chunks: bytes) -> str:
     return hasher.hexdigest()[:16]
 
 
+# Everything the app keeps between reruns, apart from the four uploaders. The
+# tables and pickers all carry a key so their contents survive a rerun, which is
+# exactly what must NOT survive a change of piece: a half-finished edit to row 40
+# of a 52-line layout means nothing to a 23-line one, and a voice picked from the
+# last score may not exist in this one.
+STATE_PREFIXES = ("secmap_", "voice_editor_")
+STATE_KEYS = (
+    "layout_edits",
+    "english_edits",
+    "pair_overrides",
+    "assign_edits",
+    "skip_voices",
+    "dropped_layout",
+    "layout_style",
+    "layout_editor",
+    "english_editor",
+    "pair_editor",
+    "review_voice",
+    "result_pdf",
+)
+
+
+def clear_work() -> None:
+    """Forget everything worked out about the piece currently loaded."""
+    for key in list(st.session_state.keys()):
+        if key in STATE_KEYS or key.startswith(STATE_PREFIXES):
+            del st.session_state[key]
+
+
+def start_another_project() -> None:
+    """The button: drop the files, the corrections, and everything made from them.
+
+    Emptying an upload box is the one thing clearing session state cannot do — the
+    browser keeps showing the file. Counting the uploaders up instead gives them
+    new keys, so Streamlit builds them fresh and they come back empty.
+    """
+    clear_work()
+    st.session_state.pop("_files", None)
+    st.session_state["upload_round"] = st.session_state.get("upload_round", 0) + 1
+    st.cache_data.clear()
+
+
 def reset_edits(token: str) -> None:
     """A new set of files means every correction from the last one is stale."""
     if st.session_state.get("_files") != token:
         st.session_state["_files"] = token
-        for key in ("layout_edits", "english_edits", "pair_overrides", "assign_edits"):
-            st.session_state[key] = {}
-        st.session_state["skip_voices"] = []
-        st.session_state["dropped_layout"] = set()
-        for key in [k for k in st.session_state if k.startswith("secmap_")]:
-            del st.session_state[key]
-        st.session_state.pop("layout_style", None)
-        st.session_state.pop("result_pdf", None)
+        clear_work()
 
 
-for key, default in [
-    ("layout_edits", {}),
-    ("english_edits", {}),
-    ("pair_overrides", {}),
-    ("assign_edits", {}),
-    ("skip_voices", []),
-    ("dropped_layout", set()),
-]:
-    st.session_state.setdefault(key, default)
+def seed_state() -> None:
+    """Put back the empty containers the rest of the script reads. Runs after any reset."""
+    for key, default in [
+        ("layout_edits", {}),
+        ("english_edits", {}),
+        ("pair_overrides", {}),
+        ("assign_edits", {}),
+        ("skip_voices", []),
+        ("dropped_layout", set()),
+        ("upload_round", 0),
+    ]:
+        st.session_state.setdefault(key, default)
+
+
+seed_state()
 
 
 # --------------------------------------------------------------------------- shared UI
@@ -137,13 +178,14 @@ st.title("Multi-lingual Sheet Music Generator")
 
 with st.sidebar:
     st.header("Your files")
-    english_file = st.file_uploader("1. English score", type=["pdf"], key="english")
-    blank_file = st.file_uploader("2. Same score, no lyrics", type=["pdf"], key="blank")
-    layout_file = st.file_uploader("3. Syllable layout", type=["pdf"], key="layout")
+    round_ = st.session_state["upload_round"]
+    english_file = st.file_uploader("1. English score", type=["pdf"], key=f"english{round_}")
+    blank_file = st.file_uploader("2. Same score, no lyrics", type=["pdf"], key=f"blank{round_}")
+    layout_file = st.file_uploader("3. Syllable layout", type=["pdf"], key=f"layout{round_}")
     english_layout_file = st.file_uploader(
         "4. English syllable layout — only if it is a separate file",
         type=["pdf"],
-        key="english_layout",
+        key=f"english_layout{round_}",
     )
 
     st.divider()
@@ -151,6 +193,15 @@ with st.sidebar:
     max_size = st.slider("Maximum text size", 4.0, 12.0, 7.25, 0.25)
     baseline = st.slider("Distance below the staff", 3.0, 14.0, 7.6, 0.1)
     font_choice = st.selectbox("Font", list(render_mod.BUNDLED_FONTS), index=0)
+
+    st.divider()
+    st.button(
+        "Start another project",
+        on_click=start_another_project,
+        width='stretch',
+        help="Clears the files, every correction you have made, and the finished PDF, "
+        "and takes you back to an empty upload screen.",
+    )
 
 uploaded = {
     "1. English score": (english_file, True, "The engraving with the English lyrics under the notes"),
@@ -191,18 +242,29 @@ blank_bytes = blank_file.getvalue()
 layout_bytes = layout_file.getvalue()
 english_layout_bytes = english_layout_file.getvalue() if english_layout_file else b""
 reset_edits(digest(english_bytes, blank_bytes, layout_bytes, english_layout_bytes))
+seed_state()
+
+
+def stop_with_a_way_out(title: str, detail: str) -> None:
+    """Never leave the page dead. Anything unexpected still offers a fresh start."""
+    st.error(f"**{title}**\n\n{detail}")
+    st.button(
+        "Start another project",
+        key=f"restart_{abs(hash(title)) % 10000}",
+        on_click=start_another_project,
+        type="primary",
+    )
+    st.stop()
 
 try:
     score_doc = parse_score_cached(english_bytes)
 except Exception as error:  # noqa: BLE001
-    st.error(f"**File 1, the English score, could not be read.**\n\n{error}")
-    st.stop()
+    stop_with_a_way_out("File 1, the English score, could not be read.", str(error))
 
 try:
     layout_doc = parse_layout_cached(layout_bytes)
 except Exception as error:  # noqa: BLE001
-    st.error(f"**File 3, the translated syllable layout, could not be read.**\n\n{error}")
-    st.stop()
+    stop_with_a_way_out("File 3, the syllable layout, could not be read.", str(error))
 
 geometry_problems = geometry_cached(score_doc, blank_bytes, digest(english_bytes, blank_bytes))
 score_sections = [name for _, _, _, name in score_doc.sections]
@@ -243,8 +305,7 @@ else:
     try:
         english_layout_doc = parse_layout_cached(english_layout_bytes)
     except Exception as error:  # noqa: BLE001
-        st.error(f"**File 4, the English syllable layout, could not be read.**\n\n{error}")
-        st.stop()
+        stop_with_a_way_out("File 4, the English syllable layout, could not be read.", str(error))
     english_style, _ = style_cached(
         english_layout_doc, score_doc, None, digest(english_bytes, english_layout_bytes)
     )
@@ -885,3 +946,15 @@ with tab_make:
         pages = fitz.open(stream=result, filetype="pdf").page_count
         page_pick = st.number_input("Page", 1, pages, 1)
         st.image(render_mod.page_image(result, int(page_pick) - 1, 2.0), width='stretch')
+
+        st.divider()
+        st.markdown("**Finished with this one?**")
+        st.button(
+            "Start another project",
+            key="restart_after_download",
+            on_click=start_another_project,
+            type="primary",
+            width='stretch',
+            help="Download anything you want to keep first — this clears the files, your "
+            "corrections and the PDF.",
+        )
