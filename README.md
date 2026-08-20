@@ -9,35 +9,28 @@ Takes a translated syllable layout and writes it under the notes of an engraved 
 | **1. English score** | The engraved score with the English lyrics under the notes | required |
 | **2. Same score, no lyrics** | The identical engraving with the lyrics removed — this is the canvas | required |
 | **3. Translated syllable layout** | The translator's document: the translated syllables, line by line | required |
-| **4. English syllable layout** | The *same* layout document before it was translated, still in English | strongly recommended |
+| **4. English syllable layout** | The *same* layout document before it was translated, still in English | required |
 
 It returns the no-lyrics score with the translated syllables placed on the notes.
 
 ---
 
-## Why the fourth file changes everything
-
-Given only the translated layout, the app has no way to know *where* each line belongs. It has
-to infer it from section labels and syllable counts. On a six-part choral score where the voices
-sing overlapping words, enter late, drop out and come back in canon, that is a hard guess.
-
-Give it the English layout as well and there is nothing left to guess. The English layout is
-matched **word for word** against the English lyrics already printed in the score, so the app
-knows exactly which notes each layout line covers. The translated line sitting opposite it then
-drops straight onto those notes.
-
-On the test piece — *Do Not Let Your Hands Drop Down*, nine voice parts, 1,034 syllable
-positions — the two approaches differ on **60% of the notes**.
-
-The app still works with three files. It just tells you plainly that it is guessing.
-
 ### Checked against a hand-made score
 
-The app's output was compared, staff line by staff line, against the Aymara score a person had
-already produced by hand for the same piece: **112 of 112 staff lines carry exactly the same
-syllables**, across nine voice parts, nine pages and 1,034 notes — including the places where a
-part enters mid-word, where two syllables share a note, and where the same English line has two
-different translations depending on which repeat it is.
+The PDF the app produces was compared, staff line by staff line, against the Aymara score a
+person had already produced by hand for the same piece:
+
+| | Staff lines matching the human version |
+| --- | --- |
+| **All four files** | **112 / 112 (100%)** |
+
+Across nine voice parts, nine pages and 1,034 notes — including the places where a part enters
+mid-word, where two syllables share a note, and where the same English line has two different
+translations depending on which repeat it is.
+
+The comparison is run against the app's own output, not against the matching engine called
+directly. An earlier version scored 100% when the engine was driven from a test script and 96%
+through the app, because the app was not passing the engine everything it needed.
 
 ---
 

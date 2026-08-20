@@ -2,11 +2,6 @@
 
 Writes a translated syllable layout under the notes of an engraved vocal score.
 
-Give it the English syllable layout as well as the translated one and the app
-stops guessing: it matches the English layout to the English score word for word,
-then puts the translated syllable that sits opposite each English syllable onto
-that same note.
-
 Everything it works out is shown back to you and can be corrected before the
 PDF is made.
 """
@@ -101,28 +96,15 @@ for key, default in [
 # --------------------------------------------------------------------------- uploads
 
 st.title("Multi-lingual Sheet Music Generator")
-st.caption(
-    "Give it the English layout as well as the translated one and it matches the words "
-    "themselves, note for note, instead of counting syllables and hoping."
-)
 
 with st.sidebar:
     st.header("Your files")
     english_file = st.file_uploader("1. English score", type=["pdf"], key="english")
     blank_file = st.file_uploader("2. Same score, no lyrics", type=["pdf"], key="blank")
     layout_file = st.file_uploader("3. Translated syllable layout", type=["pdf"], key="layout")
-    st.markdown("**4. English syllable layout** — strongly recommended")
     english_layout_file = st.file_uploader(
-        "The same layout document before it was translated",
-        type=["pdf"],
-        key="english_layout",
-        label_visibility="collapsed",
+        "4. English syllable layout", type=["pdf"], key="english_layout"
     )
-    if english_layout_file is None:
-        st.info(
-            "Without it the app has to match by syllable count alone, which is a much weaker "
-            "signal on a choral score."
-        )
 
     st.divider()
     st.header("Placement")
@@ -130,8 +112,8 @@ with st.sidebar:
     baseline = st.slider("Distance below the staff", 3.0, 14.0, 7.6, 0.1)
     font_choice = st.selectbox("Font", list(render_mod.BUNDLED_FONTS), index=0)
 
-if not (english_file and blank_file and layout_file):
-    st.info("Upload your files in the sidebar to begin. The first three are required.")
+if not (english_file and blank_file and layout_file and english_layout_file):
+    st.info("Upload all four files in the sidebar to begin.")
     st.markdown(
         """
         | File | What it is |
@@ -140,15 +122,6 @@ if not (english_file and blank_file and layout_file):
         | 2. Same score, no lyrics | The identical engraving with the lyrics removed — this is the canvas |
         | 3. Translated syllable layout | The translator's document: the translated syllables, line by line |
         | 4. English syllable layout | The *same* document before translation, still in English |
-
-        **Why the fourth file matters so much.** The translated layout on its own tells the app
-        nothing about *where* in the music each line belongs — it has to work that out from
-        section labels and syllable counts, and on a score where six voices sing overlapping
-        words that is a hard guess.
-
-        The English layout removes the guessing. The app matches its lines to the English lyrics
-        already printed in the score, word for word, so it knows exactly which notes each layout
-        line covers. The translated line sitting opposite then drops straight onto those notes.
         """
     )
     st.stop()
@@ -156,7 +129,7 @@ if not (english_file and blank_file and layout_file):
 english_bytes = english_file.getvalue()
 blank_bytes = blank_file.getvalue()
 layout_bytes = layout_file.getvalue()
-english_layout_bytes = english_layout_file.getvalue() if english_layout_file else b""
+english_layout_bytes = english_layout_file.getvalue()
 reset_edits(digest(english_bytes, blank_bytes, layout_bytes, english_layout_bytes))
 
 try:
@@ -198,19 +171,6 @@ tab_match, tab_make = tabs[-2], tabs[-1]
 # --------------------------------------------------------------------------- overview
 
 with tab_overview:
-    if use_text_matching:
-        st.success(
-            "**Word-for-word matching is on.** The English layout will be matched against the "
-            "lyrics already printed in the score, so the app knows which notes every line covers "
-            "rather than inferring it from syllable counts."
-        )
-    else:
-        st.warning(
-            "**Matching by syllable count.** No English syllable layout was uploaded, so the app "
-            "has to work out where each translated line belongs from section labels and counts "
-            "alone. Add the English layout in the sidebar for a far more reliable result."
-        )
-
     columns = st.columns(3 if use_text_matching else 2)
     with columns[0]:
         st.subheader("The score")
