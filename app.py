@@ -118,6 +118,11 @@ def verdict(count: int, clean: str, todo: str) -> None:
         st.success(f"**Nothing to fix here.**  {clean}")
 
 
+def show_boxes(text: str) -> str:
+    """A blank box is a note with no syllable on it. Show it as one, not as a dash."""
+    return " ".join("▫" if token == layout_mod.BLANK_BOX else token for token in text.split())
+
+
 def attention_table(rows: list[dict], caption: str) -> None:
     """The specific rows to look at, before the full table below."""
     if not rows:
@@ -131,12 +136,14 @@ def attention_table(rows: list[dict], caption: str) -> None:
 st.title("Multi-lingual Sheet Music Generator")
 
 with st.sidebar:
-    st.header("Your four files")
+    st.header("Your files")
     english_file = st.file_uploader("1. English score", type=["pdf"], key="english")
     blank_file = st.file_uploader("2. Same score, no lyrics", type=["pdf"], key="blank")
-    layout_file = st.file_uploader("3. Translated syllable layout", type=["pdf"], key="layout")
+    layout_file = st.file_uploader("3. Syllable layout", type=["pdf"], key="layout")
     english_layout_file = st.file_uploader(
-        "4. English syllable layout", type=["pdf"], key="english_layout"
+        "4. English syllable layout — only if it is a separate file",
+        type=["pdf"],
+        key="english_layout",
     )
 
     st.divider()
@@ -146,24 +153,32 @@ with st.sidebar:
     font_choice = st.selectbox("Font", list(render_mod.BUNDLED_FONTS), index=0)
 
 uploaded = {
-    "1. English score": (english_file, "The engraving with the English lyrics under the notes"),
-    "2. Same score, no lyrics": (blank_file, "The identical engraving with the lyrics removed"),
-    "3. Translated syllable layout": (layout_file, "The translator's document"),
-    "4. English syllable layout": (english_layout_file, "The same document before translation"),
+    "1. English score": (english_file, True, "The engraving with the English lyrics under the notes"),
+    "2. Same score, no lyrics": (blank_file, True, "The identical engraving with the lyrics removed"),
+    "3. Syllable layout": (layout_file, True, "The translator's document"),
+    "4. English syllable layout": (
+        english_layout_file,
+        False,
+        "Only needed if the English is not already in file 3",
+    ),
 }
 
-if not all(handle for handle, _ in uploaded.values()):
-    st.info("Upload all four files in the sidebar to begin.")
+if not all(handle for handle, required, _ in uploaded.values() if required):
+    st.info("Upload the first three files in the sidebar to begin.")
     st.dataframe(
         pd.DataFrame(
             [
                 {
-                    "": ICONS["ok"] if handle else ICONS["todo"],
+                    "": ICONS["ok"] if handle else (ICONS["todo"] if required else ""),
                     "File": name,
                     "What it is": description,
-                    "Status": "uploaded" if handle else "still needed",
+                    "Status": (
+                        "uploaded"
+                        if handle
+                        else ("still needed" if required else "only if needed")
+                    ),
                 }
-                for name, (handle, description) in uploaded.items()
+                for name, (handle, required, description) in uploaded.items()
             ]
         ),
         hide_index=True,
@@ -174,7 +189,7 @@ if not all(handle for handle, _ in uploaded.values()):
 english_bytes = english_file.getvalue()
 blank_bytes = blank_file.getvalue()
 layout_bytes = layout_file.getvalue()
-english_layout_bytes = english_layout_file.getvalue()
+english_layout_bytes = english_layout_file.getvalue() if english_layout_file else b""
 reset_edits(digest(english_bytes, blank_bytes, layout_bytes, english_layout_bytes))
 
 try:
@@ -189,14 +204,9 @@ except Exception as error:  # noqa: BLE001
     st.error(f"**File 3, the translated syllable layout, could not be read.**\n\n{error}")
     st.stop()
 
-try:
-    english_layout_doc = parse_layout_cached(english_layout_bytes)
-except Exception as error:  # noqa: BLE001
-    st.error(f"**File 4, the English syllable layout, could not be read.**\n\n{error}")
-    st.stop()
-
 geometry_problems = geometry_cached(score_doc, blank_bytes, digest(english_bytes, blank_bytes))
 score_sections = [name for _, _, _, name in score_doc.sections]
+score_words = score_doc.sung_words()
 
 
 # --------------------------------------------------------------------------- the pipeline
@@ -205,19 +215,48 @@ score_sections = [name for _, _, _, name in score_doc.sections]
 # with what it found. Corrections made in the tables live in session state, so
 # they are already folded in by the time this runs on the next interaction.
 
-english_style, _ = style_cached(
-    english_layout_doc, score_doc, None, digest(english_bytes, english_layout_bytes)
-)
-english_lines = layout_mod.to_editable(
-    english_layout_doc, english_style, st.session_state["english_edits"]
+# Some translators keep the English and the translation in one file, some in two.
+# Every English syllable is already printed in the score, so which rows are which
+# is read off the file rather than asked about.
+one_document = bool(
+    layout_mod.split_by_language(layout_mod.to_editable(layout_doc), score_words)[0]
 )
 
-suggested_style, style_scores = best_translation_style(
-    english_lines, layout_doc, digest(english_layout_bytes, layout_bytes)
-)
-style = st.session_state.get("layout_style", suggested_style)
+if one_document:
+    english_layout_doc = None
+    style_scores = {}
+    style = st.session_state.get("layout_style", "All rows")
+    combined = layout_mod.to_editable(
+        layout_doc,
+        style,
+        {**st.session_state["english_edits"], **st.session_state["layout_edits"]},
+    )
+    english_lines, editable_lines = layout_mod.split_by_language(combined, score_words)
+else:
+    if not english_layout_file:
+        st.error(
+            "**The English syllable layout is missing.** File 3 holds only one language, so "
+            "the app has nothing to match against the English in your score. Upload the "
+            "English layout as file 4, or upload a file 3 that contains both languages."
+        )
+        st.stop()
+    try:
+        english_layout_doc = parse_layout_cached(english_layout_bytes)
+    except Exception as error:  # noqa: BLE001
+        st.error(f"**File 4, the English syllable layout, could not be read.**\n\n{error}")
+        st.stop()
+    english_style, _ = style_cached(
+        english_layout_doc, score_doc, None, digest(english_bytes, english_layout_bytes)
+    )
+    english_lines = layout_mod.to_editable(
+        english_layout_doc, english_style, st.session_state["english_edits"]
+    )
+    suggested_style, style_scores = best_translation_style(
+        english_lines, layout_doc, digest(english_layout_bytes, layout_bytes)
+    )
+    style = st.session_state.get("layout_style", suggested_style)
+    editable_lines = layout_mod.to_editable(layout_doc, style, st.session_state["layout_edits"])
 
-editable_lines = layout_mod.to_editable(layout_doc, style, st.session_state["layout_edits"])
 working_lines = [
     line for line in editable_lines if line.id not in st.session_state["dropped_layout"]
 ]
@@ -225,7 +264,7 @@ working_lines = [
 pair_result = pairing_mod.pair_layouts(english_lines, working_lines)
 pairs = pair_result.pairs
 translation = pairing_mod.translation_map(
-    pairs, working_lines, st.session_state["pair_overrides"]
+    pairs, working_lines, st.session_state["pair_overrides"], english_lines
 )
 
 ordered_sections: list[str] = []
@@ -328,13 +367,19 @@ with tab_score:
         st.write("Voices")
         st.write(", ".join(score_doc.voices))
     with right:
-        st.markdown("**Read from the layouts**")
+        st.markdown("**Read from the layout**")
         st.metric("English lines", len(english_lines))
         st.metric("Translated lines", len(working_lines))
+        st.write(
+            "Both languages were found in file 3."
+            if one_document
+            else "English from file 4, translation from file 3."
+        )
 
     warnings = list(score_doc.warnings)
-    warnings += [f"Translated layout: {w}" for w in layout_doc.warnings]
-    warnings += [f"English layout: {w}" for w in english_layout_doc.warnings]
+    warnings += [f"Layout: {w}" for w in layout_doc.warnings]
+    if english_layout_doc is not None:
+        warnings += [f"English layout: {w}" for w in english_layout_doc.warnings]
     if warnings:
         st.markdown("**Worth knowing**")
         for warning in warnings:
@@ -371,6 +416,7 @@ with tab_lines:
                 "Tag": line.tag,
                 "Notes": line.note_count,
                 "Syllables": line.text,
+                "Blank": sum(1 for tk in line.tokens if tk == layout_mod.BLANK_BOX) or "",
                 "Joined": "yes" if line.inferred_join else "",
                 "_id": line.id,
             }
@@ -391,6 +437,12 @@ with tab_lines:
                 width="small", disabled=True, help="How many notes these syllables cover"
             ),
             "Syllables": st.column_config.TextColumn(width="large"),
+            "Blank": st.column_config.TextColumn(
+                width="small",
+                disabled=True,
+                help="Boxes with only a dash in them: notes where a syllable is held rather "
+                "than a new one sung. Written as - in the Syllables column.",
+            ),
             "Joined": st.column_config.TextColumn(
                 width="small", disabled=True, help="A box in the PDF joined syllables onto one note"
             ),
@@ -416,18 +468,22 @@ with tab_lines:
     with st.expander("Advanced — where the translation sits in the document", expanded=False):
         st.write(
             "The app tried each way of reading the file and kept whichever matched the English "
-            "layout best. Change it only if the table above is reading the wrong text."
+            "best. Change it only if the table above is reading the wrong text."
         )
-        st.dataframe(
-            pd.DataFrame(
-                [
-                    {"Reading": name, "Match": f"{value:.0%}" if value >= 0 else "no lines found"}
-                    for name, value in style_scores.items()
-                ]
-            ),
-            hide_index=True,
-            width='stretch',
-        )
+        if style_scores:
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Reading": name,
+                            "Match": f"{value:.0%}" if value >= 0 else "no lines found",
+                        }
+                        for name, value in style_scores.items()
+                    ]
+                ),
+                hide_index=True,
+                width='stretch',
+            )
         st.radio(
             "Reading to use",
             STYLE_OPTIONS,
@@ -446,6 +502,7 @@ with tab_lines:
                     "Tag": line.tag,
                     "Notes": line.note_count,
                     "Syllables": line.text,
+                    "Blank": sum(1 for tk in line.tokens if tk == layout_mod.BLANK_BOX) or "",
                     "_id": line.id,
                 }
                 for line in english_lines
@@ -462,6 +519,7 @@ with tab_lines:
                 "Tag": st.column_config.TextColumn(width="small"),
                 "Notes": st.column_config.NumberColumn(width="small", disabled=True),
                 "Syllables": st.column_config.TextColumn(width="large"),
+                "Blank": st.column_config.TextColumn(width="small", disabled=True),
                 "_id": None,
             },
             key="english_editor",
@@ -493,9 +551,9 @@ with tab_pairs:
         [
             {
                 "Section": pair.section,
-                "English": pair.english_text or "—",
+                "English": show_boxes(pair.english_text) or "—",
                 "Notes": pair.english_count,
-                "Translation": pair.translated_text or "—",
+                "Translation": show_boxes(pair.translated_text) or "—",
                 "Syllables": pair.translated_count,
                 "Issue": STATUS_TEXT[pair.status],
             }
@@ -518,7 +576,7 @@ with tab_pairs:
                 "": ICONS["ok"] if pair.status == "ok" else ICONS["warn"],
                 "Section": pair.section,
                 "Tag": pair.tag,
-                "English": pair.english_text or "—",
+                "English": show_boxes(pair.english_text) or "—",
                 "Notes": pair.english_count,
                 "Translation": (
                     st.session_state["pair_overrides"].get(pair.english_id, pair.translated_text)
@@ -681,6 +739,7 @@ with tab_match:
                 "English in the score": assignment.english,
                 "Notes": len(assignment.tokens),
                 "Syllables": text,
+                "On held notes": assignment.held_text,
                 "_key": key,
             }
         )
@@ -698,6 +757,12 @@ with tab_match:
                 width="small", disabled=True, help="Notes on this line of the score"
             ),
             "Syllables": st.column_config.TextColumn(width="large"),
+            "On held notes": st.column_config.TextColumn(
+                width="medium",
+                disabled=True,
+                help="Extra syllables the translation sings on notes where the English holds "
+                "one syllable across several. They are placed on those notes in the PDF.",
+            ),
             "_key": None,
         },
         key=f"voice_editor_{voice}",
@@ -718,6 +783,7 @@ with tab_make:
     step_header(5, "PDF", "Make the finished score.")
 
     placements: dict[int, list[str]] = {}
+    held_notes: dict[int, list[tuple]] = {}
     issues: list[dict] = []
     for voice_name, voice_plan in plans.items():
         for assignment in voice_plan.assignments:
@@ -746,9 +812,12 @@ with tab_make:
                 )
                 tokens = tokens + [""] * (need - len(tokens))
             placements[assignment.score_line_id] = tokens
+            if assignment.held:
+                held_notes[assignment.score_line_id] = list(assignment.held)
 
+    extra = sum(len(v) for v in held_notes.values())
     blank = sum(1 for tokens in placements.values() for token in tokens if not token)
-    total = sum(len(tokens) for tokens in placements.values())
+    total = sum(len(tokens) for tokens in placements.values()) + extra
 
     left, right = st.columns([1, 2])
     with left:
@@ -772,7 +841,7 @@ with tab_make:
                 max_size=max_size, baseline_offset=baseline, font_choice=font_choice
             )
             st.session_state["result_pdf"] = render_mod.render(
-                score_doc, blank_bytes, placements, settings
+                score_doc, blank_bytes, placements, settings, held_notes
             )
         except Exception as error:  # noqa: BLE001
             st.error(f"**The PDF could not be made.**\n\n{error}")

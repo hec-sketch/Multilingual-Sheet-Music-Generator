@@ -23,7 +23,26 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field, replace
 
+from .layout import BLANK_BOX
 from .textutil import fold
+
+
+def sung_positions(english_lines) -> dict:
+    """Position of every sung box in the layout, counted as the aligner counts.
+
+    Blank boxes are not part of the alignment, so they take up no position. The
+    timeline and the matcher must agree about this or every voice after the first
+    is held to the wrong moment.
+    """
+    positions: dict[tuple, int] = {}
+    running = 0
+    for line in english_lines:
+        for index, token in enumerate(line.tokens):
+            if token == BLANK_BOX:
+                continue
+            positions[(line.id, index)] = running
+            running += 1
+    return positions
 
 INFINITY = float("inf")
 
@@ -63,10 +82,17 @@ class Assignment:
     layout_line_ids: list[int] = field(default_factory=list)
     status: str = "ok"  # ok | partial | unmatched | edited
     note: str = ""
+    # Syllables sung on notes the English holds a vowel across, so there is no
+    # printed English syllable to hang them on: (x of the note, the syllable).
+    held: list[tuple] = field(default_factory=list)
 
     @property
     def note_count(self) -> int:
         return len(self.tokens)
+
+    @property
+    def held_text(self) -> str:
+        return " ".join(text for _, text in self.held)
 
 
 @dataclass
@@ -302,24 +328,18 @@ def build_timeline(score_lines, mapping, english_lines) -> dict:
     reference for *when* they are singing, which is what tells two identical
     lines apart.
     """
-    offsets: dict[int, int] = {}
-    running = 0
-    for line in english_lines:
-        offsets[line.id] = running
-        running += len(line.tokens)
+    positions = sung_positions(english_lines)
 
     timeline: dict[tuple, list] = {}
     anchors = [anchor for line in score_lines for anchor in line.anchors]
     for anchor, entry in zip(anchors, mapping):
         if entry is None:
             continue
-        line_id, index = entry
-        if line_id not in offsets:
+        where = positions.get(entry)
+        if where is None:
             continue
         key = (anchor.page, anchor.system)
-        timeline.setdefault(key, []).append(
-            ((anchor.x0 + anchor.x1) / 2, offsets[line_id] + index)
-        )
+        timeline.setdefault(key, []).append(((anchor.x0 + anchor.x1) / 2, where))
     for key in timeline:
         timeline[key].sort()
     return timeline
@@ -390,6 +410,12 @@ def map_voice_to_layout(
         section = section_set(section_map.get(line.section, line.section))
         bonus = _tag_bonus(line.tag, voice)
         for index, token in enumerate(line.tokens):
+            # A blank box is a note the English holds a syllable across, so there
+            # is no English word here to match a printed syllable against. It is
+            # left out of the alignment entirely and filled afterwards, from the
+            # note in the engraving that carries no lyric.
+            if token == BLANK_BOX:
+                continue
             right.append((fold(token), section, bonus, line.id, index, running))
             running += 1
 
@@ -483,6 +509,41 @@ def repair_word_starts(mapping, translation) -> dict[int, str]:
     return fixes
 
 
+def _fill_held_notes(line, slice_, english_lines, translation) -> list[tuple]:
+    """Put the translation's extra syllables onto the notes the English holds.
+
+    Where the English layout has a blank box, the translator has written a real
+    syllable in the box opposite. There is no English syllable printed on that
+    note, so the only way to place it is the note itself: the engraving is read
+    for notes carrying no lyric, and the syllable goes on the one that falls
+    between the syllables either side of the blank.
+    """
+    if not line.held_notes:
+        return []
+    by_id = {item.id: item for item in english_lines}
+    out: list[tuple] = []
+    taken: set[float] = set()
+    for offset, entry in enumerate(slice_):
+        if entry is None:
+            continue
+        english = by_id.get(entry[0])
+        words = translation.get(entry[0])
+        if english is None or words is None:
+            continue
+        # Blank boxes sitting immediately after the box on this note.
+        index = entry[1] + 1
+        free = [x for x in line.held_after(offset) if x not in taken]
+        while index < len(english.tokens) and english.tokens[index] == BLANK_BOX and free:
+            if index < len(words):
+                syllable = (words[index] or "").strip()
+                if syllable and syllable != BLANK_BOX:
+                    out.append((free[0], syllable))
+                    taken.add(free[0])
+            free = free[1:]
+            index += 1
+    return out
+
+
 def align_voice_by_text(
     voice, score_lines, english_lines, translation, section_map, timeline=None
 ) -> VoicePlan:
@@ -526,6 +587,8 @@ def align_voice_by_text(
             if line_id not in used:
                 used.append(line_id)
 
+        held = _fill_held_notes(line, slice_, english_lines, translation)
+
         blanks = sum(1 for t in tokens if not t)
         if blanks == 0:
             status, note = "ok", ""
@@ -557,6 +620,7 @@ def align_voice_by_text(
                 layout_line_ids=used,
                 status=status,
                 note=note,
+                held=held,
             )
         )
 

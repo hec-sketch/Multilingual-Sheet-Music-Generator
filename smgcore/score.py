@@ -67,6 +67,16 @@ class Anchor:
 
 
 @dataclass
+class Notehead:
+    """One note in the engraving, whether or not a syllable is printed under it."""
+
+    page: int
+    staff: int
+    x: float
+    y: float
+
+
+@dataclass
 class ScoreLine:
     """A contiguous run of syllables for one voice on one staff."""
 
@@ -77,6 +87,10 @@ class ScoreLine:
     voice: str
     section: str
     anchors: list[Anchor] = field(default_factory=list)
+    # Notes inside this line's span that carry no printed syllable. A syllable is
+    # held across them in English; a translation may need to sing a new syllable
+    # on one. Each entry is (index of the anchor it follows, x of the note).
+    held_notes: list[tuple] = field(default_factory=list)
 
     @property
     def text(self) -> str:
@@ -90,6 +104,10 @@ class ScoreLine:
     def y(self) -> float:
         return self.anchors[0].y if self.anchors else 0.0
 
+    def held_after(self, index: int) -> list[float]:
+        """The x positions of any held notes sitting after anchor `index`."""
+        return [x for after, x in self.held_notes if after == index]
+
 
 @dataclass
 class ScoreDoc:
@@ -101,6 +119,14 @@ class ScoreDoc:
     voices: list[str]
     lyric_font: tuple | None
     warnings: list[str] = field(default_factory=list)
+
+    def sung_words(self) -> set:
+        """Every syllable printed in the score, for telling English text from a translation."""
+        from .textutil import fold
+
+        words = {fold(anchor.text).strip("-") for anchor in self.anchors}
+        words.discard("")
+        return words
 
     def lines_by_voice(self) -> dict[str, list[ScoreLine]]:
         out: dict[str, list[ScoreLine]] = defaultdict(list)
@@ -487,6 +513,99 @@ def apply_sections(anchors: list[Anchor], sections: list[tuple]) -> None:
 # --------------------------------------------------------------------------- lines
 
 
+# Noteheads in the Opus music fonts these scores are engraved with. The glyph's
+# *origin* is the notehead's real position; its bounding box is a fixed em box
+# three times the height of a staff and says nothing about where the note sits.
+NOTEHEAD_GLYPHS = set("œ˙w")
+CHORD_TOLERANCE = 2.5  # notes this close in x are one chord, i.e. one moment
+
+
+def extract_noteheads(page, page_number: int, staves: list[Staff]) -> list[Notehead]:
+    """Every note on the page, assigned to the staff it is closest to."""
+    if not staves:
+        return []
+    found: list[Notehead] = []
+    for block in page.get_text("rawdict")["blocks"]:
+        if block.get("type", 0) != 0:
+            continue
+        for line in block.get("lines", []):
+            for span in line["spans"]:
+                if not span["font"].startswith("Opus"):
+                    continue
+                for char in span["chars"]:
+                    if char["c"] not in NOTEHEAD_GLYPHS:
+                        continue
+                    x, y = char["origin"]
+                    staff = min(staves, key=lambda s: abs(y - (s.top + s.bottom) / 2))
+                    height = max(staff.bottom - staff.top, 1.0)
+                    # Ledger lines put notes outside the staff, but not this far.
+                    if not (staff.top - height <= y <= staff.bottom + height):
+                        continue
+                    found.append(Notehead(page_number, staff.index, x, y))
+
+    # A chord is several noteheads at one moment; the line only needs the moment.
+    found.sort(key=lambda n: (n.staff, n.x))
+    unique: list[Notehead] = []
+    for note in found:
+        if unique and unique[-1].staff == note.staff and note.x - unique[-1].x < CHORD_TOLERANCE:
+            continue
+        unique.append(note)
+    return unique
+
+
+def attach_held_notes(lines: list[ScoreLine], noteheads: list[Notehead]) -> None:
+    """Record, for each line, the notes inside it that carry no printed syllable.
+
+    A syllable sitting under a note is engraved at roughly that note's x. Any note
+    between the first and last syllable of a line with nothing under it is one the
+    English holds a vowel across — and is exactly where a translation with more
+    syllables than the English needs to put one.
+    """
+    by_staff: dict[tuple, list[Notehead]] = defaultdict(list)
+    for note in noteheads:
+        by_staff[(note.page, note.staff)].append(note)
+
+    for line in lines:
+        if len(line.anchors) < 2:
+            continue
+        first, last = line.anchors[0], line.anchors[-1]
+        notes = [
+            note
+            for note in by_staff.get((line.page, line.staff), [])
+            if first.x0 - 10 <= note.x <= last.x1 + 4
+        ]
+        if len(notes) <= len(line.anchors):
+            continue
+
+        # Anchors and notes both run left to right and every anchor has a note, so
+        # give each anchor the nearest note that is still free. A syllable is
+        # centred under its note, except where it is held and an extension line
+        # follows, when it is set flush left — so neither edge alone identifies the
+        # note, but the order does. Whatever is left over is a held note.
+        claimed: list[int] = []
+        cursor = 0
+        for anchor in line.anchors:
+            available = range(cursor, len(notes) - (len(line.anchors) - len(claimed) - 1))
+            if not available:
+                break
+            pick = min(available, key=lambda k: min(abs(notes[k].x - anchor.x0),
+                                                    abs(notes[k].x - anchor.centre)))
+            claimed.append(pick)
+            cursor = pick + 1
+        if len(claimed) != len(line.anchors):
+            continue
+
+        held: list[tuple] = []
+        for index, pick in enumerate(claimed):
+            start = claimed[index - 1] + 1 if index else 0
+            for k in range(start, pick):
+                if index:
+                    held.append((index - 1, notes[k].x))
+        for k in range(claimed[-1] + 1, len(notes)):
+            held.append((len(line.anchors) - 1, notes[k].x))
+        line.held_notes = held
+
+
 def build_lines(anchors: list[Anchor]) -> list[ScoreLine]:
     """Group each staff's anchors into one score line per staff occurrence."""
     grouped: dict[tuple, list[Anchor]] = defaultdict(list)
@@ -562,6 +681,11 @@ def parse_score(pdf_bytes: bytes) -> ScoreDoc:
     apply_sections(anchors, sections)
     anchors.sort(key=lambda a: (a.page, a.system, a.staff, a.x0))
     lines = build_lines(anchors)
+
+    noteheads: list[Notehead] = []
+    for page_number, page in enumerate(doc):
+        noteheads.extend(extract_noteheads(page, page_number, staves_by_page[page_number]))
+    attach_held_notes(lines, noteheads)
 
     if not sections:
         warnings.append(

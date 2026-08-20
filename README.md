@@ -2,16 +2,27 @@
 
 Takes a translated syllable layout and writes it under the notes of an engraved vocal score.
 
-## The four files
+## The files
 
 | File | What it is | |
 | --- | --- | --- |
 | **1. English score** | The engraved score with the English lyrics under the notes | required |
 | **2. Same score, no lyrics** | The identical engraving with the lyrics removed — this is the canvas | required |
-| **3. Translated syllable layout** | The translator's document: the translated syllables, line by line | required |
-| **4. English syllable layout** | The *same* layout document before it was translated, still in English | required |
+| **3. Syllable layout** | The translator's document, line by line | required |
+| **4. English syllable layout** | The same layout before it was translated | only if it is a separate file |
 
 It returns the no-lyrics score with the translated syllables placed on the notes.
+
+**One file or two.** Some translators keep the English layout and the translated one in a single
+document — facing halves, or one under the other. Others keep them as two files. Either works,
+and you are not asked which: every English syllable is already printed in your score, so the app
+reads each row and knows whether it is English or the translation. Rows come out at around 100%
+against the score when they are English and under a third when they are not, so it is not a
+close call. Step 1 tells you which it found.
+
+Where the two languages sit in one document, the translator has already lined each translated
+line up with its English one, so the app does not have to work that out: pairing is exact rather
+than a sequence match.
 
 ---
 
@@ -49,6 +60,19 @@ found and reported rather than silently shifting everything after it.
 una"*; the app reads the box and joins those syllables onto one note. Draw it once and it is
 applied to every repeat of that line. You can also do it by hand anywhere: delete the space
 between two syllables and they share a note; add a space and they split again.
+
+**Empty boxes, in either language.** The layout is a grid of one box per note, and a box holding
+only a dash is a note the English sings no new syllable on — it holds the one before. The app
+treats those as real boxes:
+
+- **English blank, translation filled.** There is no English syllable on that note to hang the
+  translation from, so the app reads the *engraving* instead: it finds the notes carrying no
+  lyric and puts the syllable on the right one.
+- **English filled, translation blank.** The note is simply left empty, as the translator
+  intended. Which box is empty is worked out from the column it sits in, not from the counts —
+  the two documents share the same grid, so a column with nothing opposite it is the answer.
+
+A difference in the two syllable counts is only reported when the blanks cannot account for it.
 
 **Template documents.** A layout whose later pages are the blank template the translator worked
 from is read correctly — the empty pages are recognised and ignored.

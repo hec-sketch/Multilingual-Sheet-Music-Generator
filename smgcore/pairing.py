@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .align import normalize_section
+from .layout import BLANK_BOX
 
 INFINITY = float("inf")
 
@@ -168,7 +169,7 @@ def pair_layouts(english_lines, translated_lines) -> PairingResult:
                     tag=a.tag or b.tag,
                     english_count=a.note_count,
                     translated_count=b.note_count,
-                    status="ok" if a.note_count == b.note_count else "count",
+                    status=_count_status(a, b),
                 )
             )
             i, j = i - 1, j - 1
@@ -229,10 +230,65 @@ def pair_layouts(english_lines, translated_lines) -> PairingResult:
     return PairingResult(pairs=pairs, confidence=confidence, notes=notes)
 
 
-def translation_map(pairs: list[Pair], translated_lines, overrides=None) -> dict[int, list[str]]:
+def _count_status(english, translated) -> str:
+    """Whether a difference in the two syllable counts is a problem.
+
+    It is not a problem when the English line has blank boxes: those are notes the
+    English holds a syllable across, and a translator is free to leave them empty
+    too. Only a difference the blanks cannot account for needs a human.
+    """
+    if english.note_count == translated.note_count:
+        return "ok"
+    blanks = sum(1 for token in english.tokens if token == BLANK_BOX)
+    if blanks and english.note_count - blanks == translated.note_count:
+        return "ok"
+    return "count"
+
+
+def align_by_column(english, translated) -> list[str]:
+    """Line the translated boxes up with the English ones by where they sit.
+
+    The two documents are the same grid — one box per note — so a box the
+    translator left empty, or an extra one they added, shows up as a column with
+    nothing opposite it. Comparing positions finds which box is missing; counting
+    alone can only say that one is. Positions are measured from the start of each
+    line, so a different left margin between the two documents does not matter.
+    """
+    ex, tx = english.xs, translated.xs
+    if not ex or not tx or len(ex) != len(english.tokens) or len(tx) != len(translated.tokens):
+        return list(translated.tokens)
+
+    span = max(ex[-1] - ex[0], 1.0)
+    pitch = span / max(len(ex) - 1, 1)
+    tolerance = max(pitch * 0.55, 6.0)
+    e_rel = [x - ex[0] for x in ex]
+    t_rel = [x - tx[0] for x in tx]
+
+    out: list[str] = []
+    cursor = 0
+    for want in e_rel:
+        best = None
+        for j in range(cursor, len(t_rel)):
+            if abs(t_rel[j] - want) <= tolerance:
+                best = j
+                break
+            if t_rel[j] > want + tolerance:
+                break  # the translation has nothing in this column
+        if best is None:
+            out.append("")  # the translator left this note empty
+        else:
+            out.append(translated.tokens[best])
+            cursor = best + 1
+    return out
+
+
+def translation_map(
+    pairs: list[Pair], translated_lines, overrides=None, english_lines=None
+) -> dict[int, list[str]]:
     """{english layout line id: translated syllable tokens}, honouring user edits."""
     overrides = overrides or {}
     by_id = {line.id: line for line in translated_lines}
+    english_by_id = {line.id: line for line in (english_lines or [])}
     out: dict[int, list[str]] = {}
     for pair in pairs:
         if pair.english_id is None:
@@ -243,6 +299,11 @@ def translation_map(pairs: list[Pair], translated_lines, overrides=None) -> dict
         if pair.translated_id is None:
             continue
         line = by_id.get(pair.translated_id)
-        if line is not None:
+        if line is None:
+            continue
+        english = english_by_id.get(pair.english_id)
+        if english is not None and len(english.tokens) != len(line.tokens):
+            out[pair.english_id] = align_by_column(english, line)
+        else:
             out[pair.english_id] = list(line.tokens)
     return out

@@ -91,6 +91,24 @@ class LayoutLine:
         joined = sum(len(g) - 1 for g in self.join_groups)
         return max(0, len(self.tokens) - joined)
 
+    def merged_x(self) -> list[float]:
+        """The x position of each box, after joined syllables are merged."""
+        if not self.join_groups:
+            return [t.x0 for t in self.tokens]
+        inside = {i: g for g in self.join_groups for i in g}
+        out: list[float] = []
+        consumed: set[int] = set()
+        for index, token in enumerate(self.tokens):
+            if index in consumed:
+                continue
+            group = inside.get(index)
+            if group:
+                out.append(self.tokens[group[0]].x0)
+                consumed.update(group)
+            else:
+                out.append(token.x0)
+        return out
+
     def merged_tokens(self) -> list[str]:
         """Token list with boxed groups merged into single note-sized tokens."""
         if not self.join_groups:
@@ -154,6 +172,10 @@ class EditableLine:
     inferred_join: bool = False
     y: float = 0.0
     order: int = 0
+    # Where each box sits across the page. The layout is a grid of one box per
+    # note, and the English and translated documents share that grid, so these
+    # are what line a translated box up with the English box above it.
+    xs: list[float] = field(default_factory=list)
     # Set when this line is a second or later performance of a block the layout
     # wrote once (a chorus sung three times). Holds the id of the written line.
     repeat_of: int | None = None
@@ -168,6 +190,36 @@ class EditableLine:
 
     def merged_tokens(self) -> list[str]:
         return list(self.tokens)
+
+
+ENGLISH_ROW = 0.6  # share of a row's syllables that must be in the score for it to be English
+
+
+def split_by_language(lines, english_vocabulary) -> tuple[list, list]:
+    """Separate one layout that holds both languages into English and translation.
+
+    Some translators work in a single document: the English syllable layout and the
+    translated one in the same file, either as facing halves or one under the other.
+    Which is which is not a guess — every syllable of the English is already printed
+    in the score, so a row is English when its syllables are words the score sings.
+    In practice this is not a close call: English rows score around 100% and
+    translated rows under a third, whatever the language.
+
+    Returns (english, translated). Both empty if the document is only one language.
+    """
+    if not english_vocabulary:
+        return [], []
+    english, translated = [], []
+    for line in lines:
+        words = [fold(token).strip("-") for token in line.tokens]
+        words = [word for word in words if word]
+        if not words:
+            continue
+        share = sum(1 for word in words if word in english_vocabulary) / len(words)
+        (english if share >= ENGLISH_ROW else translated).append(line)
+    if not english or not translated:
+        return [], []
+    return english, translated
 
 
 # "By faith x3" is a line sung three times, not two words and a third syllable.
@@ -201,8 +253,11 @@ def to_editable(
         if style == "Only page text (ignore comments)" and line.from_annotation:
             continue
         text = overrides.get(line.id)
-        tokens = text.split() if text is not None else line.merged_tokens()
-        tokens = expand_repeat_marker(tokens)
+        untouched = text is None
+        tokens = line.merged_tokens() if untouched else text.split()
+        expanded = expand_repeat_marker(tokens)
+        xs = line.merged_x() if untouched and expanded is tokens else []
+        tokens = expanded
         out.append(
             EditableLine(
                 id=line.id,
@@ -210,6 +265,7 @@ def to_editable(
                 section=line.section,
                 tag=line.tag,
                 tokens=tokens,
+                xs=xs if len(xs) == len(tokens) else [],
                 kind=line.kind,
                 from_annotation=line.from_annotation,
                 inferred_join=line.source == "inferred-join",
@@ -254,8 +310,19 @@ def _annotations(page):
     return texts, boxes, comments
 
 
-def tokenize_words(words: list[tuple]) -> list[Token]:
-    """Turn positioned words into syllable tokens, keeping each token's x extent."""
+BLANK_BOX = "-"  # a box of the grid with no syllable in it: the note is held
+
+
+def tokenize_words(words: list[tuple], blank_gap: float = 1e9) -> list[Token]:
+    """Turn positioned words into syllable tokens, keeping each token's x extent.
+
+    These documents are a grid: one box per note. A dash written hard against the
+    syllable before it is that syllable's hyphen ("liv" + "-"). A dash sitting on
+    its own, a whole column away from its neighbours, is a *box of its own* — the
+    English holds the previous syllable over that note, and the translation may
+    well sing a new syllable there. ``blank_gap`` is where one reading stops and
+    the other starts, measured from the document's own column spacing.
+    """
     dashes = "".join(DASHES)
     tokens: list[Token] = []
     for x0, x1, raw in words:
@@ -265,8 +332,9 @@ def tokenize_words(words: list[tuple]) -> list[Token]:
         for dash in dashes[1:]:
             text = text.replace(dash, "-")
         if set(text) <= {"-"}:
-            # A free-standing dash belongs to the syllable before it.
-            if tokens and not tokens[-1].text.endswith("-"):
+            if tokens and (x0 - tokens[-1].x1) >= blank_gap:
+                tokens.append(Token(BLANK_BOX, x0, x1))  # its own box: a held note
+            elif tokens and not tokens[-1].text.endswith("-"):
                 tokens[-1].text += "-"
                 tokens[-1].x1 = max(tokens[-1].x1, x1)
             continue
@@ -363,16 +431,22 @@ def _read_rows(doc) -> tuple[list[dict], dict[int, float]]:
             if text.strip():
                 items.append((round(y0, 1), x0, x1, text))
 
-        # Some viewers do not fold annotation text into the page text; add anything missing.
+        # Some viewers do not fold annotation text into the page text; add anything
+        # missing. Compare with accents and spacing stripped: the same syllables can
+        # come out of the two layers with a combining mark attached to a different
+        # letter ("maʉ̃ ba" against "maʉ ̃ba"), which is the same text on the page
+        # but not the same string, and adding it again doubles the line.
         existing = {
-            normalize_spacing(" ".join(w[3] for w in row)) for row in _cluster_rows(items, 4.0)
+            fold(" ".join(w[3] for w in row)) for row in _cluster_rows(items, 4.0)
         }
+        existing.discard("")
         for rect, content in annot_texts:
             for offset, piece in enumerate(content.splitlines()):
                 piece = piece.strip()
                 if not piece:
                     continue
-                if any(normalize_spacing(piece) in seen for seen in existing):
+                folded = fold(piece)
+                if folded and any(folded in seen for seen in existing):
                     continue
                 y = rect.y0 + offset * 13.0
                 width = max(rect.width, 1.0)
@@ -418,10 +492,28 @@ def _measure_columns(pages: list[dict]) -> tuple[float, float]:
     return body_start - 8, max(body_start + 40, body_end * 0.62)
 
 
+def _measure_blank_gap(pages: list[dict]) -> float:
+    """How far a dash must sit from the syllable before it to be a box of its own.
+
+    Taken from the document's own column spacing, because the two cases are far
+    apart in practice: a hyphen is set 2-3pt after its syllable, a dash alone in a
+    box is a third of a column or more away.
+    """
+    pitch: list[float] = []
+    for entry in pages:
+        for row in entry["rows"]:
+            if len(row) >= 4:
+                pitch += [row[i][1] - row[i - 1][1] for i in range(1, len(row))]
+    if not pitch:
+        return 1e9
+    return max(8.0, statistics.median(pitch) * 0.35)
+
+
 def parse_layout(pdf_bytes: bytes) -> LayoutDoc:
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     pages, heights = _read_rows(doc)
     margin, instruction_x = _measure_columns(pages)
+    blank_gap = _measure_blank_gap(pages)
 
     lines: list[LayoutLine] = []
     warnings: list[str] = []
@@ -460,7 +552,7 @@ def parse_layout(pdf_bytes: bytes) -> LayoutDoc:
             if not body_words:
                 continue
 
-            tokens = tokenize_words([(w[1], w[2], w[3]) for w in body_words])
+            tokens = tokenize_words([(w[1], w[2], w[3]) for w in body_words], blank_gap)
             if not tokens:
                 continue
 
