@@ -39,13 +39,13 @@ ICONS = {"ok": "✓", "warn": "!", "err": "✕", "todo": "○"}
 # given a visible border and a tinted field, because the default Streamlit
 # styling leaves them almost invisible against a white page.
 
-INK = "#2F3D4B"        # deep navy: all body text
-SLATE = "#5A6B78"      # slate blue: controls, headings, focus
-SAGE = "#B9BEAF"       # sage: rules and quiet borders
-SAND = "#EADFCC"       # cream: panel fill
-TAN = "#DFC7B0"        # warm tan: highlight fill
-PAPER = "#FAF8F4"      # page tint
-ATTENTION = "#9A5B33"  # the one warm signal colour, for items needing review
+INK = "#2F3D4B"        # deep navy: body text, and the mark for anything outstanding
+SLATE = "#5A6B78"      # slate blue: controls and headings
+SAGE = "#A9B39C"       # sage: borders and rules
+MOSS = "#DDE4D5"       # soft green: panels for work that is complete
+SAND = "#EADFCC"       # cream: the sidebar
+TAN = "#DFC7B0"        # warm tan: panels for work still outstanding
+PAPER = "#F7F7F2"      # page tint, very slightly green
 
 THEME = f"""
 <style>
@@ -56,7 +56,7 @@ THEME = f"""
   }}
   h1 {{
       font-weight: 600; letter-spacing: -.02em; color: {INK};
-      border-bottom: 2px solid {SAGE}; padding-bottom: .5rem; margin-bottom: .3rem;
+      border-bottom: 3px solid {SAGE}; padding-bottom: .5rem; margin-bottom: .3rem;
   }}
   h2, h3 {{ font-weight: 600; letter-spacing: -.01em; color: {INK}; }}
   [data-testid="stWidgetLabel"] p {{
@@ -84,7 +84,7 @@ THEME = f"""
   }}
   /* the chevron: boxed, tinted, unmistakably a menu */
   .react-aria-ComboBox > div[role="group"] > button {{
-      background: {SAND} !important; border-left: 1.5px solid {SLATE} !important;
+      background: {MOSS} !important; border-left: 1.5px solid {SLATE} !important;
       border-radius: 0 6px 6px 0 !important; width: 42px !important;
       margin: 0 !important; height: 100% !important;
   }}
@@ -120,7 +120,7 @@ THEME = f"""
   }}
   [data-testid="stTab"] p {{ margin: 0 !important; font-size: .92rem; }}
   [data-testid="stTab"] [data-testid="stMarkdownContainer"] {{ width: 100%; }}
-  [data-testid="stTab"]:hover {{ background: {SAND}; }}
+  [data-testid="stTab"]:hover {{ background: {MOSS}; }}
   [data-testid="stTab"][aria-selected="true"] {{
       background: {SLATE} !important; border-color: {SLATE} !important;
       border-left-color: {INK} !important;
@@ -137,7 +137,7 @@ THEME = f"""
       background: {SLATE}; border-color: {SLATE}; color: #FFFFFF;
   }}
   [data-testid="stBaseButton-primary"]:hover {{ background: {INK}; border-color: {INK}; }}
-  [data-testid="stBaseButton-secondary"]:hover {{ background: {SAND}; }}
+  [data-testid="stBaseButton-secondary"]:hover {{ background: {MOSS}; }}
 
   /* --- Tables and panels --- */
   [data-testid="stDataFrame"], [data-testid="stDataEditor"] {{
@@ -192,6 +192,19 @@ def best_translation_style(_english_lines, _translated_doc, key: str):
     return max(results, key=lambda s: results[s]), results
 
 
+@st.cache_data(show_spinner="Setting the syllables...", max_entries=3)
+def render_cached(_score_doc, blank: bytes, _placements, _held, size, offset, font, key):
+    """Draw the score. Cached on the type settings so a slider change re-renders once.
+
+    Only the settings and the file identity vary between calls, so moving a slider
+    produces a new render and moving it back returns the previous one from cache.
+    """
+    settings = render_mod.RenderSettings(
+        max_size=size, baseline_offset=offset, font_choice=font
+    )
+    return render_mod.render(_score_doc, blank, _placements, settings, _held)
+
+
 def digest(*chunks: bytes) -> str:
     hasher = hashlib.sha256()
     for chunk in chunks:
@@ -219,7 +232,11 @@ STATE_KEYS = (
     "review_voice",
     "grid_line",
     "result_pdf",
+    "has_generated",
+    "preview_page",
 )
+# Kept while the piece is being worked on and cleared only by "Start a new project".
+SESSION_KEYS = ("reference_audio", "max_size", "baseline", "font_choice")
 
 
 def clear_work() -> None:
@@ -237,6 +254,8 @@ def start_another_project() -> None:
     new keys, so Streamlit builds them fresh and they come back empty.
     """
     clear_work()
+    for key in SESSION_KEYS:
+        st.session_state.pop(key, None)
     st.session_state.pop("_files", None)
     st.session_state["upload_round"] = st.session_state.get("upload_round", 0) + 1
     st.cache_data.clear()
@@ -292,16 +311,16 @@ def verdict(count: int, clean: str, todo: str) -> None:
     """One status line per step: either the step is complete, or it names the work."""
     if count:
         st.markdown(
-            f'<div style="background:#FBF0E6;border:1px solid {ATTENTION};border-radius:8px;'
-            f'padding:12px 14px;margin-bottom:14px;">'
-            f'<strong style="color:{ATTENTION};">{count} item(s) require review.</strong> '
+            f'<div style="background:{TAN};border:1px solid {SAGE};border-left:5px solid {INK};'
+            f'border-radius:6px;padding:12px 15px;margin-bottom:14px;">'
+            f'<strong style="color:{INK};">{count} item(s) require review.</strong> '
             f'<span style="color:{INK};">{todo}</span></div>',
             unsafe_allow_html=True,
         )
     else:
         st.markdown(
-            f'<div style="background:{SAND};border:1px solid {SAGE};border-radius:8px;'
-            f'padding:12px 14px;margin-bottom:14px;">'
+            f'<div style="background:{MOSS};border:1px solid {SAGE};border-left:5px solid {SAGE};'
+            f'border-radius:6px;padding:12px 15px;margin-bottom:14px;">'
             f'<strong style="color:{INK};">Step complete — no action required.</strong> '
             f'<span style="color:{INK};">{clean}</span></div>',
             unsafe_allow_html=True,
@@ -338,18 +357,43 @@ with st.sidebar:
     )
 
     st.divider()
+    st.header("Reference recording")
+    st.caption(
+        "Optional. A recording in the vernacular, available on every step for checking "
+        "the syllables against how the line is actually sung."
+    )
+    audio_file = st.file_uploader(
+        "Audio file",
+        type=["mp3", "wav", "m4a", "ogg", "flac"],
+        key=f"reference_audio{round_}",
+        label_visibility="collapsed",
+    )
+    if audio_file is not None:
+        st.session_state["reference_audio"] = {
+            "data": audio_file.getvalue(),
+            "name": audio_file.name,
+        }
+    reference = st.session_state.get("reference_audio")
+    if reference:
+        st.audio(reference["data"])
+        st.caption(reference["name"])
+
+    st.divider()
     st.header("Type settings")
-    max_size = st.slider("Maximum type size", 4.0, 12.0, 7.25, 0.25)
-    baseline = st.slider("Distance below staff", 3.0, 14.0, 7.6, 0.1)
-    font_choice = st.selectbox("Font", list(render_mod.BUNDLED_FONTS), index=0)
+    st.caption("Changes apply to the score immediately once it has been generated.")
+    max_size = st.slider("Maximum type size", 4.0, 12.0, 7.25, 0.25, key="max_size")
+    baseline = st.slider("Distance below staff", 3.0, 14.0, 7.6, 0.1, key="baseline")
+    font_choice = st.selectbox(
+        "Font", list(render_mod.BUNDLED_FONTS), index=0, key="font_choice"
+    )
 
     st.divider()
     st.button(
         "Start a new project",
         on_click=start_another_project,
         width='stretch',
-        help="Clears all source files, all corrections and the generated PDF, and "
-        "returns to the upload screen.",
+        help="Clears all source files, all corrections, the reference recording and the "
+        "generated PDF, and returns to the upload screen.",
     )
 
 uploaded = {
@@ -365,7 +409,7 @@ uploaded = {
 
 if not all(handle for handle, required, _ in uploaded.values() if required):
     st.markdown(
-        f'<div style="background:{SAND};border:1px solid {SAGE};border-radius:8px;'
+        f'<div style="background:{MOSS};border:1px solid {SAGE};border-radius:6px;'
         f'padding:14px 16px;margin-bottom:16px;"><strong>To begin, upload files 1 to 3 '
         f'using the panel on the left.</strong> File 4 is required only when the English '
         f'syllable layout is supplied as a separate document.</div>',
@@ -401,13 +445,15 @@ seed_state()
 
 
 def stop_with_a_way_out(title: str, detail: str) -> None:
-    """Never leave the page dead. Anything unexpected still offers a fresh start."""
-    st.error(f"**{title}**\n\n{detail}")
-    st.button(
-        "Start a new project",
-        key=f"restart_{abs(hash(title)) % 10000}",
-        on_click=start_another_project,
-        type="primary",
+    """Never leave the page dead. The sidebar is drawn first, so its reset button is
+    still on screen — say so rather than adding a second one beside it."""
+    st.markdown(
+        f'<div style="background:{TAN};border:1px solid {SAGE};border-left:5px solid {INK};'
+        f'border-radius:6px;padding:14px 16px;"><strong>{title}</strong>'
+        f'<div style="margin-top:6px;">{detail}</div>'
+        f'<div style="margin-top:10px;">Supply a different file, or use '
+        f'<strong>Start a new project</strong> in the panel on the left.</div></div>',
+        unsafe_allow_html=True,
     )
     st.stop()
 
@@ -578,17 +624,17 @@ st.markdown(
 )
 if outstanding:
     st.markdown(
-        f'<div style="background:#FBF0E6;border:1px solid {ATTENTION};border-radius:8px;'
-        f'padding:11px 15px;margin-bottom:12px;color:{INK};">'
-        f'<strong style="color:{ATTENTION};">Requires review: '
+        f'<div style="background:{TAN};border:1px solid {SAGE};border-left:5px solid {INK};'
+        f'border-radius:6px;padding:11px 15px;margin-bottom:12px;color:{INK};">'
+        f'<strong style="color:{INK};">Requires review: '
         f'{"Step " + ", ".join(str(n) for n in outstanding)}.</strong> '
         "Open each step listed and resolve the items shown.</div>",
         unsafe_allow_html=True,
     )
 else:
     st.markdown(
-        f'<div style="background:{SAND};border:1px solid {SAGE};border-radius:8px;'
-        f'padding:11px 15px;margin-bottom:12px;color:{INK};">'
+        f'<div style="background:{MOSS};border:1px solid {SAGE};border-left:5px solid {SAGE};'
+        f'border-radius:6px;padding:11px 15px;margin-bottom:12px;color:{INK};">'
         "<strong>All checks passed.</strong> Review each step if required, then generate "
         "the score in Step 5.</div>",
         unsafe_allow_html=True,
@@ -1192,22 +1238,38 @@ with tab_make:
 
     st.markdown("---")
     if st.button("Generate the score", type="primary", width='stretch'):
+        st.session_state["has_generated"] = True
+
+    result = None
+    if st.session_state.get("has_generated"):
+        # Rendering is cached on the type settings, so moving a slider re-renders and the
+        # preview follows immediately. Generate does not have to be pressed again.
         try:
-            settings = render_mod.RenderSettings(
-                max_size=max_size, baseline_offset=baseline, font_choice=font_choice
-            )
-            st.session_state["result_pdf"] = render_mod.render(
-                score_doc, blank_bytes, placements, settings, held_notes
+            result = render_cached(
+                score_doc,
+                blank_bytes,
+                placements,
+                held_notes,
+                max_size,
+                baseline,
+                font_choice,
+                digest(english_bytes, blank_bytes, layout_bytes, english_layout_bytes),
             )
         except Exception as error:  # noqa: BLE001
-            st.error(f"**The PDF could not be generated.**\n\n{error}")
+            st.markdown(
+                f'<div style="background:{TAN};border:1px solid {SAGE};border-left:5px solid {INK};'
+                f'border-radius:6px;padding:12px 15px;"><strong>The score could not be '
+                f'generated.</strong> {error}</div>',
+                unsafe_allow_html=True,
+            )
+        st.session_state["result_pdf"] = result
 
-    if st.session_state.get("result_pdf"):
-        result = st.session_state["result_pdf"]
+    if result:
         st.markdown(
-            f'<div style="background:{SAND};border:1px solid {SAGE};border-radius:8px;'
-            f'padding:12px 14px;margin:6px 0 14px 0;"><strong>The score is ready to '
-            f'download.</strong></div>',
+            f'<div style="background:{MOSS};border:1px solid {SAGE};border-left:5px solid {SAGE};'
+            f'border-radius:6px;padding:12px 14px;margin:6px 0 14px 0;"><strong>The score is '
+            f'ready to download.</strong> Type size, spacing and font can be adjusted in the '
+            f'panel on the left; the preview updates as you move them.</div>',
             unsafe_allow_html=True,
         )
 
@@ -1244,16 +1306,12 @@ with tab_make:
         import pymupdf as fitz
 
         pages = fitz.open(stream=result, filetype="pdf").page_count
-        page_pick = st.number_input(f"Preview page (1 to {pages})", 1, pages, 1)
-        st.image(render_mod.page_image(result, int(page_pick) - 1, 2.0), width='stretch')
-
-        st.divider()
-        st.markdown("**Finished with this score?**")
-        st.button(
-            "Start a new project",
-            key="restart_after_download",
-            on_click=start_another_project,
-            width='stretch',
-            help="Download anything required before continuing. This clears all source files, "
-            "corrections and the generated PDF.",
+        # Keep the page the user was looking at when a setting changes, rather than
+        # dropping them back to page 1. A shorter score clamps it into range.
+        if st.session_state.get("preview_page", 1) > pages:
+            st.session_state["preview_page"] = pages
+        st.session_state.setdefault("preview_page", 1)
+        page_pick = st.number_input(
+            f"Preview page (1 to {pages})", 1, pages, key="preview_page"
         )
+        st.image(render_mod.page_image(result, int(page_pick) - 1, 2.0), width='stretch')
