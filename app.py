@@ -102,31 +102,39 @@ THEME = f"""
   }}
   [data-testid="stFileUploaderDropzone"]:hover {{ background: {PAPER}; }}
 
-  /* --- The five steps: one segmented bar that is both the state and the navigation. --- */
-  div[role="tablist"] {{
-      gap: 6px !important; margin: .2rem 0 1.4rem 0 !important;
-      border-bottom: none !important; flex-wrap: nowrap;
-      height: auto !important; overflow: visible !important; align-items: stretch;
-  }}
-  div[role="tablist"] > * {{ height: auto !important; }}
-  [data-testid="stTab"] {{
-      flex: 1 1 0; justify-content: flex-start; align-items: flex-start;
-      flex-direction: column; text-align: left; white-space: pre-line; line-height: 1.35;
-      background: #FFFFFF; border: 1px solid {SAGE} !important;
-      border-left: 4px solid {SLATE} !important; border-radius: 6px;
-      padding: 11px 14px 12px 14px !important; height: auto !important; min-height: 66px;
-      color: {INK} !important; font-weight: 600; font-size: .95rem;
+  /* --- The five steps. Each one is a button holding its own state, so the step on
+         screen is remembered and a change made anywhere else does not move it. --- */
+  [class*="st-key-step_btn_"] button {{
+      width: 100%; justify-content: flex-start !important; align-items: flex-start !important;
+      flex-direction: column !important; text-align: left; line-height: 1.3;
+      border: 1px solid {SAGE} !important; border-left: 4px solid {SLATE} !important;
+      border-radius: 6px !important; padding: 10px 12px 11px 13px !important;
+      min-height: 68px; height: auto !important; font-weight: 600;
       transition: background .12s ease;
   }}
-  [data-testid="stTab"] p {{ margin: 0 !important; font-size: .92rem; }}
-  [data-testid="stTab"] [data-testid="stMarkdownContainer"] {{ width: 100%; }}
-  [data-testid="stTab"]:hover {{ background: {MOSS}; }}
-  [data-testid="stTab"][aria-selected="true"] {{
+  [class*="st-key-step_btn_"] button p {{ margin: 0 !important; font-size: .9rem; }}
+  [class*="st-key-step_btn_"] button p + p {{
+      margin-top: 5px !important; font-size: .8rem; font-weight: 500; opacity: .82;
+  }}
+  /* the label is centred by default; these two put it against the left edge */
+  [class*="st-key-step_btn_"] button > div,
+  [class*="st-key-step_btn_"] button > div > span {{
+      width: 100% !important; justify-content: flex-start !important;
+  }}
+  [class*="st-key-step_btn_"] [data-testid="stMarkdownContainer"] {{
+      width: 100%; text-align: left;
+  }}
+  [class*="st-key-step_btn_"] [data-testid="stBaseButton-secondary"] {{
+      background: #FFFFFF; color: {INK} !important;
+  }}
+  [class*="st-key-step_btn_"] [data-testid="stBaseButton-secondary"]:hover {{
+      background: {MOSS};
+  }}
+  [class*="st-key-step_btn_"] [data-testid="stBaseButton-primary"] {{
       background: {SLATE} !important; border-color: {SLATE} !important;
       border-left-color: {INK} !important;
   }}
-  [data-testid="stTab"][aria-selected="true"] * {{ color: #FFFFFF !important; }}
-  div[role="tablist"] + div [data-baseweb="tab-highlight"] {{ display: none !important; }}
+  [class*="st-key-step_btn_"] [data-testid="stBaseButton-primary"] * {{ color: #FFFFFF !important; }}
 
   /* --- Buttons --- */
   [data-testid="stBaseButton-secondary"], [data-testid="stBaseButton-primary"] {{
@@ -234,6 +242,7 @@ STATE_KEYS = (
     "result_pdf",
     "has_generated",
     "preview_page",
+    "active_step",
 )
 # Kept while the piece is being worked on and cleared only by "Start a new project".
 SESSION_KEYS = ("reference_audio", "max_size", "baseline", "font_choice")
@@ -278,6 +287,7 @@ def seed_state() -> None:
         ("skip_voices", []),
         ("dropped_layout", set()),
         ("upload_round", 0),
+        ("active_step", 1),
     ]:
         st.session_state.setdefault(key, default)
 
@@ -313,7 +323,7 @@ def verdict(count: int, clean: str, todo: str) -> None:
         st.markdown(
             f'<div style="background:{TAN};border:1px solid {SAGE};border-left:5px solid {INK};'
             f'border-radius:6px;padding:12px 15px;margin-bottom:14px;">'
-            f'<strong style="color:{INK};">{count} item(s) require review.</strong> '
+            f'<strong style="color:{INK};">{count} item(s) to check.</strong> '
             f'<span style="color:{INK};">{todo}</span></div>',
             unsafe_allow_html=True,
         )
@@ -321,7 +331,7 @@ def verdict(count: int, clean: str, todo: str) -> None:
         st.markdown(
             f'<div style="background:{MOSS};border:1px solid {SAGE};border-left:5px solid {SAGE};'
             f'border-radius:6px;padding:12px 15px;margin-bottom:14px;">'
-            f'<strong style="color:{INK};">Step complete — no action required.</strong> '
+            f'<strong style="color:{INK};">Nothing to change here.</strong> '
             f'<span style="color:{INK};">{clean}</span></div>',
             unsafe_allow_html=True,
         )
@@ -357,11 +367,8 @@ with st.sidebar:
     )
 
     st.divider()
-    st.header("Reference recording")
-    st.caption(
-        "Optional. A recording in the vernacular, available on every step for checking "
-        "the syllables against how the line is actually sung."
-    )
+    st.header("Reference audio")
+    st.caption("(Optional) Upload an audio to listen to a reference as needed.")
     audio_file = st.file_uploader(
         "Audio file",
         type=["mp3", "wav", "m4a", "ogg", "flac"],
@@ -380,7 +387,6 @@ with st.sidebar:
 
     st.divider()
     st.header("Type settings")
-    st.caption("Changes apply to the score immediately once it has been generated.")
     max_size = st.slider("Maximum type size", 4.0, 12.0, 7.25, 0.25, key="max_size")
     baseline = st.slider("Distance below staff", 3.0, 14.0, 7.6, 0.1, key="baseline")
     font_choice = st.selectbox(
@@ -392,8 +398,7 @@ with st.sidebar:
         "Start a new project",
         on_click=start_another_project,
         width='stretch',
-        help="Clears all source files, all corrections, the reference recording and the "
-        "generated PDF, and returns to the upload screen.",
+        help="Removes the files, the corrections and the generated score.",
     )
 
 uploaded = {
@@ -609,7 +614,7 @@ score_state = "err" if geometry_problems else ("warn" if score_doc.warnings else
 layout_state = "warn" if layout_trouble else "ok"
 pair_state = "warn" if pair_trouble else "ok"
 notes_state = "warn" if (mismatched_lines or empty_notes or unmapped_sections) else "ok"
-ready_state = "ok" if st.session_state.get("result_pdf") else "todo"
+ready_state = "ok" if st.session_state.get("has_generated") else "todo"
 
 states = [score_state, layout_state, pair_state, notes_state, ready_state]
 outstanding = [
@@ -618,46 +623,74 @@ outstanding = [
 
 st.markdown(
     f'<p style="color:{SLATE};margin:-4px 0 12px 0;font-size:1.03rem;">'
-    "Complete the five steps in order. Each step reports whether it needs attention; "
-    "the score is generated in Step 5.</p>",
+    "Work through the five steps below. Each one shows whether anything needs your "
+    "attention, and the finished score is produced in Step 5.</p>",
     unsafe_allow_html=True,
 )
 if outstanding:
     st.markdown(
         f'<div style="background:{TAN};border:1px solid {SAGE};border-left:5px solid {INK};'
         f'border-radius:6px;padding:11px 15px;margin-bottom:12px;color:{INK};">'
-        f'<strong style="color:{INK};">Requires review: '
+        f'<strong style="color:{INK};">Needs your attention: '
         f'{"Step " + ", ".join(str(n) for n in outstanding)}.</strong> '
-        "Open each step listed and resolve the items shown.</div>",
+        "Open each of those steps and check the items listed there.</div>",
         unsafe_allow_html=True,
     )
 else:
     st.markdown(
         f'<div style="background:{MOSS};border:1px solid {SAGE};border-left:5px solid {SAGE};'
         f'border-radius:6px;padding:11px 15px;margin-bottom:12px;color:{INK};">'
-        "<strong>All checks passed.</strong> Review each step if required, then generate "
-        "the score in Step 5.</div>",
+        "<strong>Nothing needs attention.</strong> Look through the steps if you wish, "
+        "then generate the score in Step 5.</div>",
         unsafe_allow_html=True,
     )
 
-LABELS = {"ok": "Reviewed", "warn": "Needs review", "err": "Not valid", "todo": "Not started"}
-tabs = st.tabs(
-    [
-        f"{index}  {STEP_TITLES[index - 1]}\n\n{ICONS[state]} {LABELS[state]}"
-        for index, state in enumerate(states, start=1)
-    ]
-)
-tab_score, tab_lines, tab_pairs, tab_match, tab_make = tabs
+LABELS = {"ok": "Ready", "warn": "Needs a check", "err": "Problem found", "todo": "Not started"}
+
+
+def go_to_step(number: int) -> None:
+    st.session_state["active_step"] = number
+
+
+# The step bar is five buttons rather than tabs. A tab strip forgets which tab was
+# open whenever the script reruns, so moving a slider sent the page back to Step 1.
+# The step being viewed is held in session state instead, where nothing else touches it.
+step_columns = st.columns(5, gap="small")
+for index, state in enumerate(states, start=1):
+    with step_columns[index - 1]:
+        st.button(
+            f"{index}  {STEP_TITLES[index - 1]}\n\n{ICONS[state]} {LABELS[state]}",
+            key=f"step_btn_{index}",
+            on_click=go_to_step,
+            args=(index,),
+            type="primary" if st.session_state["active_step"] == index else "secondary",
+            width='stretch',
+        )
+
+step = int(st.session_state.get("active_step", 1))
+st.write("")
+
+
+def next_step_button(number: int, label: str) -> None:
+    """The way forward from the bottom of a step, so the bar is not the only route."""
+    st.markdown("---")
+    st.button(
+        label,
+        key=f"next_from_{number}",
+        on_click=go_to_step,
+        args=(number + 1,),
+        type="primary",
+    )
 
 
 # --------------------------------------------------------------------------- 1 · Score
 
-with tab_score:
-    step_header(1, "Confirm that both score files were read correctly, then continue to Step 2.")
+if step == 1:
+    step_header(1, "Check that both score files were read correctly.")
     verdict(
         len(geometry_problems),
-        "Both files are the same engraving, so every syllable will align to a note.",
-        "The two files do not align. Syllables cannot be placed until this is resolved.",
+        "The two score files match, so every syllable will land on the right note.",
+        "The two files are not the same engraving. Upload a matching pair to continue.",
     )
     for problem in geometry_problems:
         st.error(problem)
@@ -693,11 +726,13 @@ with tab_score:
         for warning in warnings:
             st.warning(warning)
 
+    next_step_button(1, "Continue to Step 2 · Syllable layout")
+
 
 # --------------------------------------------------------------------------- 2 · Syllables
 
-with tab_lines:
-    step_header(2, "Confirm that the translator's document was read correctly, then continue to Step 3.")
+if step == 2:
+    step_header(2, "Check the syllables read from the translator's document.")
     verdict(
         len(layout_trouble),
         "Every line of the layout was read as a row of syllables.",
@@ -706,7 +741,7 @@ with tab_lines:
     attention_table(
         [{"Page": line.page + 1, "Section": line.section, "Line": line.text or "(empty)"}
          for line in layout_trouble],
-        "Lines requiring review",
+        "Lines to check",
     )
 
     st.markdown("---")
@@ -775,8 +810,8 @@ with tab_lines:
 
     with st.expander("Advanced · Where the translation sits within the document", expanded=False):
         st.write(
-            "Each reading of the file was tested and the closest match to the English retained. "
-            "Change this only if the table above shows the wrong text."
+            "The app has already chosen how to read the document. Change this only if the "
+            "table above shows the wrong text."
         )
         if style_scores:
             st.dataframe(
@@ -801,7 +836,7 @@ with tab_lines:
         )
 
     with st.expander("Advanced · The English layout as it was read", expanded=False):
-        st.write("Edit a line here only if the original English document was misread.")
+        st.write("Change a line here only if the English was read from the document incorrectly.")
         english_frame = pd.DataFrame(
             [
                 {
@@ -837,6 +872,8 @@ with tab_lines:
             if row["Syllables"] != original.text:
                 st.session_state["english_edits"][int(row["_id"])] = row["Syllables"]
 
+    next_step_button(2, "Continue to Step 3 · Translation")
+
 
 # --------------------------------------------------------------------------- 3 · Translation
 
@@ -847,13 +884,13 @@ STATUS_TEXT = {
     "translation-only": "no English line",
 }
 
-with tab_pairs:
-    step_header(3, "Confirm that each English line is matched to the correct translation, then continue to Step 4.")
+if step == 3:
+    step_header(3, "Check that each English line is matched with the right translation.")
     verdict(
         len(pair_trouble),
         "Every English line is matched to a translation with the same number of syllables.",
-        "Review the rows below. Where the counts differ, set two syllables on one note by "
-        "removing the space between them, or separate them by adding a space.",
+        "Check the rows below. Where the counts differ, put two syllables on one note by "
+        "removing the space between them, or split them by adding a space.",
     )
     attention_table(
         [
@@ -867,15 +904,15 @@ with tab_pairs:
             }
             for pair in pair_trouble
         ],
-        "Lines requiring review",
+        "Lines to check",
     )
     for note in pair_result.notes:
         st.info(note)
 
     st.markdown("---")
     st.markdown(
-        f"**{pair_result.confidence:.0%} of lines matched without ambiguity.** "
-        "Overwrite any entry in the **Translation** column to correct it."
+        f"**{pair_result.confidence:.0%} of lines matched.** "
+        "Type over any entry in the **Translation** column to correct it."
     )
 
     pair_frame = pd.DataFrame(
@@ -998,12 +1035,13 @@ with tab_pairs:
                    else "No voice is currently assigned to this line.")
             )
 
+    next_step_button(3, "Continue to Step 4 · Note assignment")
 
 
 # --------------------------------------------------------------------------- 4 · Notes
 
-with tab_match:
-    step_header(4, "Confirm that every note receives the correct syllable, then continue to Step 5.")
+if step == 4:
+    step_header(4, "Check the syllables set on each note, one voice at a time.")
     verdict(
         len(mismatched_lines) + len(unmapped_sections) + (1 if empty_notes else 0),
         "Every note carries a syllable and every section is accounted for.",
@@ -1030,7 +1068,7 @@ with tab_match:
             }
             for voice_name, assignment, given, need in mismatched_lines[:25]
         ],
-        "Lines requiring review",
+        "Lines to check",
     )
     if len(mismatched_lines) > 25:
         st.caption(f"...and {len(mismatched_lines) - 25} more.")
@@ -1064,7 +1102,7 @@ with tab_match:
         "Voices to leave in English",
         score_doc.voices,
         key="skip_voices",
-        help="Voices selected here are omitted entirely and carry no lyrics.",
+        help="A voice selected here keeps its English and receives no syllables.",
     )
 
     if not plans:
@@ -1104,13 +1142,13 @@ with tab_match:
     solo = st.checkbox(
         f"Assign different words to {voice} only",
         key=f"solo_{voice}",
-        help="Cleared: edit the words in Step 3 and every voice singing that line follows. "
-        "Selected: entries made here apply to this voice alone.",
+        help="Leave this off to correct the words once in Step 3 for every voice that sings "
+        "them. Turn it on only where this voice sings something different.",
     )
     if not solo:
         st.caption(
-            "To change a syllable, use **Step 3**. The correction is made once and applies to "
-            "every voice singing that line. Select the option above only where this voice sings "
+            "To change a syllable, go to **Step 3**. The correction is made once and applies "
+            "to every voice singing that line. Use the option above only where this voice sings "
             "different words."
         )
 
@@ -1178,11 +1216,13 @@ with tab_match:
             for text in dict.fromkeys(unresolved):
                 st.write("- " + text)
 
+    next_step_button(4, "Continue to Step 5 · Output")
+
 
 # --------------------------------------------------------------------------- 5 · PDF
 
-with tab_make:
-    step_header(5, "Generate the finished score and download it.")
+if step == 5:
+    step_header(5, "Generate the score and download it.")
 
     placements: dict[int, list[str]] = {}
     held_notes: dict[int, list[tuple]] = {}
@@ -1228,8 +1268,8 @@ with tab_make:
         verdict(
             len(issues),
             "Every note will carry a syllable.",
-            "The lines below will still be written, with the gaps shown. Return to Step 4 to "
-            "complete them, or proceed.",
+            "The score can still be generated, with those notes left empty. Go back to Step 4 "
+            "to fill them in first if you prefer.",
         )
 
     attention_table(issues[:15], "Notes that will remain empty")
@@ -1237,8 +1277,13 @@ with tab_make:
         st.caption(f"...and {len(issues) - 15} more.")
 
     st.markdown("---")
-    if st.button("Generate the score", type="primary", width='stretch'):
-        st.session_state["has_generated"] = True
+    st.button(
+        "Generate the score",
+        type="primary",
+        width='stretch',
+        key="generate",
+        on_click=lambda: st.session_state.update(has_generated=True),
+    )
 
     result = None
     if st.session_state.get("has_generated"):
@@ -1269,7 +1314,7 @@ with tab_make:
             f'<div style="background:{MOSS};border:1px solid {SAGE};border-left:5px solid {SAGE};'
             f'border-radius:6px;padding:12px 14px;margin:6px 0 14px 0;"><strong>The score is '
             f'ready to download.</strong> Type size, spacing and font can be adjusted in the '
-            f'panel on the left; the preview updates as you move them.</div>',
+            f'panel on the left.</div>',
             unsafe_allow_html=True,
         )
 
