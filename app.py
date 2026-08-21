@@ -81,7 +81,7 @@ def digest(*chunks: bytes) -> str:
 # exactly what must NOT survive a change of piece: a half-finished edit to row 40
 # of a 52-line layout means nothing to a 23-line one, and a voice picked from the
 # last score may not exist in this one.
-STATE_PREFIXES = ("secmap_", "voice_editor_")
+STATE_PREFIXES = ("secmap_", "voice_editor_", "grid_editor_", "solo_")
 STATE_KEYS = (
     "layout_edits",
     "english_edits",
@@ -94,6 +94,7 @@ STATE_KEYS = (
     "english_editor",
     "pair_editor",
     "review_voice",
+    "grid_line",
     "result_pdf",
 )
 
@@ -355,6 +356,13 @@ aligned_lines, aligned_translation = aligner.prepare_layout(
 )
 timeline = aligner.reference_timeline(score_doc, aligned_lines, section_map)
 
+# A repeated chorus is a copy with its own id; corrections belong to the line the
+# translator actually wrote, so map every copy back to it.
+repeat_origin = {
+    line.id: (line.repeat_of if line.repeat_of is not None else line.id)
+    for line in aligned_lines
+}
+
 plans: dict[str, aligner.VoicePlan] = {}
 for voice_name in active_voices:
     voice_lines = grouped.get(voice_name, [])
@@ -362,6 +370,17 @@ for voice_name in active_voices:
         plans[voice_name] = aligner.align_voice_by_text(
             voice_name, voice_lines, aligned_lines, aligned_translation, section_map, timeline
         )
+
+
+# Which voices sing each line of the layout. Two voices land on the same layout
+# line when the alignment gave them the same words, whether they sing them together
+# or a bar apart — so a syllable corrected once is corrected for all of them.
+voices_by_layout_line: dict[int, set] = {}
+for voice_name, voice_plan in plans.items():
+    for assignment in voice_plan.assignments:
+        for line_id in assignment.layout_line_ids:
+            origin = repeat_origin.get(line_id, line_id)
+            voices_by_layout_line.setdefault(origin, set()).add(voice_name)
 
 
 def edited_tokens(voice_name: str, assignment) -> list[str]:
@@ -679,6 +698,78 @@ with tab_pairs:
         if original is not None and row["Translation"] != original.translated_text:
             st.session_state["pair_overrides"][eid] = row["Translation"]
 
+    # ------------------------------------------------------------------ one line, note by note
+    st.markdown("---")
+    st.markdown("**Work on one line, note by note**")
+    st.write(
+        "One row per note, with the English word that sits on it. Type the syllable straight "
+        "into the box. Two syllables in one box are sung on that one note; an empty box leaves "
+        "the note held. A change here applies to **every voice that sings this line**."
+    )
+
+    english_by_id = {line.id: line for line in english_lines}
+    choices = [
+        pair.english_id
+        for pair in pairs
+        if pair.english_id is not None and pair.english_id in english_by_id
+    ]
+    if choices:
+        def line_label(eid: int) -> str:
+            line = english_by_id[eid]
+            singers = len(voices_by_layout_line.get(eid, ()))
+            mark = "" if any(p.english_id == eid and p.status == "ok" for p in pairs) else "  !"
+            voices = "1 voice" if singers == 1 else f"{singers} voices"
+            return f"[{line.section or '—'}]  {show_boxes(line.text)[:52]}   ({voices}){mark}"
+
+        picked = st.selectbox(
+            "Line to work on", choices, format_func=line_label, key="grid_line"
+        )
+        english_line = english_by_id[picked]
+        current = translation.get(picked, [])
+        singers = sorted(voices_by_layout_line.get(picked, ()))
+
+        st.caption(
+            ("Sung by " + ", ".join(singers)) if singers
+            else "No voice is singing this line at the moment."
+        )
+
+        grid = pd.DataFrame(
+            [
+                {
+                    "Note": index + 1,
+                    "English": (
+                        "▫ held" if token == layout_mod.BLANK_BOX else token
+                    ),
+                    "Syllable": (current[index] if index < len(current) else ""),
+                }
+                for index, token in enumerate(english_line.tokens)
+            ]
+        )
+        edited_grid = st.data_editor(
+            grid,
+            hide_index=True,
+            width='stretch',
+            height=min(420, 60 + 35 * len(grid)),
+            column_config={
+                "Note": st.column_config.NumberColumn(width="small", disabled=True),
+                "English": st.column_config.TextColumn(
+                    width="medium", disabled=True, help="The English sung on this note"
+                ),
+                "Syllable": st.column_config.TextColumn(
+                    width="medium", help="Leave empty to sing nothing new on this note"
+                ),
+            },
+            key=f"grid_editor_{picked}",
+        )
+        typed = [str(v or "").strip() for v in edited_grid["Syllable"].tolist()]
+        if typed != [str(t) for t in current]:
+            st.session_state["pair_overrides"][picked] = typed
+            st.info(
+                "Saved. "
+                + (f"Applied to {len(singers)} voice(s): " + ", ".join(singers) if singers
+                   else "No voice sings this line yet.")
+            )
+
 
 # --------------------------------------------------------------------------- 4 · Notes
 
@@ -783,9 +874,20 @@ with tab_match:
     voice = st.selectbox("Voice to review line by line", list(plans), key="review_voice")
     plan = plans[voice]
     st.markdown(
-        "**The English printed in the score, and the syllables going onto those same notes.** "
-        "Type over the Syllables column to change anything."
+        "**The English printed in the score, and the syllables going onto those same notes.**"
     )
+    solo = st.checkbox(
+        f"Give {voice} different words from the other voices",
+        key=f"solo_{voice}",
+        help="Off: correct the words on Step 3 and every voice singing that line follows. "
+        "On: whatever you type here applies to this voice only.",
+    )
+    if not solo:
+        st.caption(
+            "To change a syllable, use **Step 3** — the correction is made once and every "
+            "voice singing that line picks it up. Tick the box above only if this voice "
+            "genuinely sings something different."
+        )
 
     rows = []
     for assignment in plan.assignments:
@@ -801,6 +903,10 @@ with tab_match:
                 "Notes": len(assignment.tokens),
                 "Syllables": text,
                 "On held notes": assignment.held_text,
+                "Sung by": len(
+                    set().union(*(voices_by_layout_line.get(repeat_origin.get(i, i), set())
+                                  for i in assignment.layout_line_ids))
+                ) if assignment.layout_line_ids else 1,
                 "_key": key,
             }
         )
@@ -817,19 +923,29 @@ with tab_match:
             "Notes": st.column_config.NumberColumn(
                 width="small", disabled=True, help="Notes on this line of the score"
             ),
-            "Syllables": st.column_config.TextColumn(width="large"),
+            "Syllables": st.column_config.TextColumn(width="large", disabled=not solo),
             "On held notes": st.column_config.TextColumn(
                 width="medium",
                 disabled=True,
                 help="Extra syllables the translation sings on notes where the English holds "
                 "one syllable across several. They are placed on those notes in the PDF.",
             ),
+            "Sung by": st.column_config.NumberColumn(
+                width="small",
+                disabled=True,
+                help="How many voices sing these words. Correcting them on Step 3 changes "
+                "them for all of them at once.",
+            ),
             "_key": None,
         },
         key=f"voice_editor_{voice}",
     )
-    for _, row in edited_voice.iterrows():
-        st.session_state["assign_edits"][row["_key"]] = row["Syllables"]
+    if solo:
+        for _, row in edited_voice.iterrows():
+            st.session_state["assign_edits"][row["_key"]] = row["Syllables"]
+    else:
+        for assignment in plan.assignments:
+            st.session_state["assign_edits"].pop(f"{voice}||{assignment.score_line_id}", None)
 
     unresolved = [a.note for a in plan.assignments if a.note]
     if unresolved:

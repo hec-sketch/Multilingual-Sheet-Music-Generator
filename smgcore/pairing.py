@@ -294,7 +294,14 @@ def translation_map(
         if pair.english_id is None:
             continue
         if pair.english_id in overrides:
-            out[pair.english_id] = str(overrides[pair.english_id]).split()
+            # A list is one entry per note, so a note may hold two syllables with a
+            # space between them. A plain string is still split on spaces.
+            value = overrides[pair.english_id]
+            out[pair.english_id] = (
+                [str(token) for token in value]
+                if isinstance(value, (list, tuple))
+                else str(value).split()
+            )
             continue
         if pair.translated_id is None:
             continue
