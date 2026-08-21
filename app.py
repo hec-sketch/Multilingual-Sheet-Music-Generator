@@ -30,7 +30,130 @@ STYLE_OPTIONS = [
 ]
 
 ICONS = {"ok": "✓", "warn": "!", "err": "✕", "todo": "○"}
-COLOURS = {"ok": "green", "warn": "orange", "err": "red", "todo": "gray"}
+
+# --------------------------------------------------------------------------- appearance
+#
+# One palette, used everywhere. Muted and low-contrast by design, so that the
+# only strong colour on the page is the one marking something that needs
+# attention. Every control that opens — a menu, a picker, an upload box — is
+# given a visible border and a tinted field, because the default Streamlit
+# styling leaves them almost invisible against a white page.
+
+INK = "#2F3D4B"        # deep navy: all body text
+SLATE = "#5A6B78"      # slate blue: controls, headings, focus
+SAGE = "#B9BEAF"       # sage: rules and quiet borders
+SAND = "#EADFCC"       # cream: panel fill
+TAN = "#DFC7B0"        # warm tan: highlight fill
+PAPER = "#FAF8F4"      # page tint
+ATTENTION = "#9A5B33"  # the one warm signal colour, for items needing review
+
+THEME = f"""
+<style>
+  html, body, [class*="css"] {{ color: {INK}; }}
+  .stApp {{ background: {PAPER}; }}
+  section[data-testid="stSidebar"] {{
+      background: {SAND}; border-right: 1px solid {SAGE};
+  }}
+  h1 {{
+      font-weight: 600; letter-spacing: -.02em; color: {INK};
+      border-bottom: 2px solid {SAGE}; padding-bottom: .5rem; margin-bottom: .3rem;
+  }}
+  h2, h3 {{ font-weight: 600; letter-spacing: -.01em; color: {INK}; }}
+  [data-testid="stWidgetLabel"] p {{
+      font-weight: 600 !important; color: {INK} !important; font-size: .9rem !important;
+  }}
+
+  /* --- Controls that open. The default styling is a faint underline that is easy
+         to miss, so every one gets a solid field, a border and a boxed chevron. --- */
+  .react-aria-ComboBox > div[role="group"],
+  [data-testid="stMultiSelect"] div[data-baseweb="select"] > div,
+  [data-testid="stNumberInput"] > div,
+  [data-testid="stTextInput"] > div {{
+      background: #FFFFFF !important;
+      border: 1.5px solid {SLATE} !important;
+      border-radius: 8px !important;
+      min-height: 44px !important;
+      box-shadow: 0 1px 2px rgba(47,61,75,.07);
+  }}
+  .react-aria-ComboBox > div[role="group"]:hover,
+  [data-testid="stMultiSelect"] div[data-baseweb="select"] > div:hover {{
+      border-color: {INK} !important;
+  }}
+  .react-aria-ComboBox > div[role="group"]:focus-within {{
+      border-color: {INK} !important; box-shadow: 0 0 0 3px rgba(90,107,120,.18);
+  }}
+  /* the chevron: boxed, tinted, unmistakably a menu */
+  .react-aria-ComboBox > div[role="group"] > button {{
+      background: {SAND} !important; border-left: 1.5px solid {SLATE} !important;
+      border-radius: 0 6px 6px 0 !important; width: 42px !important;
+      margin: 0 !important; height: 100% !important;
+  }}
+  .react-aria-ComboBox > div[role="group"] > button svg {{
+      fill: {INK} !important; width: 20px !important; height: 20px !important;
+  }}
+  .react-aria-ComboBox input[role="combobox"] {{
+      font-weight: 500; color: {INK} !important; padding-left: 12px !important;
+  }}
+
+  /* --- Upload boxes read as drop targets. --- */
+  [data-testid="stFileUploaderDropzone"] {{
+      background: #FFFFFF; border: 1.5px dashed {SLATE};
+      border-radius: 10px; padding: 14px 16px;
+  }}
+  [data-testid="stFileUploaderDropzone"]:hover {{ background: {PAPER}; }}
+
+  /* --- The five steps: one segmented bar that is both the state and the navigation. --- */
+  div[role="tablist"] {{
+      gap: 6px !important; margin: .2rem 0 1.4rem 0 !important;
+      border-bottom: none !important; flex-wrap: nowrap;
+      height: auto !important; overflow: visible !important; align-items: stretch;
+  }}
+  div[role="tablist"] > * {{ height: auto !important; }}
+  [data-testid="stTab"] {{
+      flex: 1 1 0; justify-content: flex-start; align-items: flex-start;
+      flex-direction: column; text-align: left; white-space: pre-line; line-height: 1.35;
+      background: #FFFFFF; border: 1px solid {SAGE} !important;
+      border-left: 4px solid {SLATE} !important; border-radius: 6px;
+      padding: 11px 14px 12px 14px !important; height: auto !important; min-height: 66px;
+      color: {INK} !important; font-weight: 600; font-size: .95rem;
+      transition: background .12s ease;
+  }}
+  [data-testid="stTab"] p {{ margin: 0 !important; font-size: .92rem; }}
+  [data-testid="stTab"] [data-testid="stMarkdownContainer"] {{ width: 100%; }}
+  [data-testid="stTab"]:hover {{ background: {SAND}; }}
+  [data-testid="stTab"][aria-selected="true"] {{
+      background: {SLATE} !important; border-color: {SLATE} !important;
+      border-left-color: {INK} !important;
+  }}
+  [data-testid="stTab"][aria-selected="true"] * {{ color: #FFFFFF !important; }}
+  div[role="tablist"] + div [data-baseweb="tab-highlight"] {{ display: none !important; }}
+
+  /* --- Buttons --- */
+  [data-testid="stBaseButton-secondary"], [data-testid="stBaseButton-primary"] {{
+      border-radius: 8px; font-weight: 600; min-height: 44px;
+      border: 1.5px solid {SLATE};
+  }}
+  [data-testid="stBaseButton-primary"] {{
+      background: {SLATE}; border-color: {SLATE}; color: #FFFFFF;
+  }}
+  [data-testid="stBaseButton-primary"]:hover {{ background: {INK}; border-color: {INK}; }}
+  [data-testid="stBaseButton-secondary"]:hover {{ background: {SAND}; }}
+
+  /* --- Tables and panels --- */
+  [data-testid="stDataFrame"], [data-testid="stDataEditor"] {{
+      border: 1px solid {SAGE}; border-radius: 8px; overflow: hidden;
+  }}
+  [data-testid="stExpander"] {{
+      border: 1px solid {SAGE}; border-radius: 8px; background: #FFFFFF;
+  }}
+  [data-testid="stExpander"] summary {{ font-weight: 600; color: {INK}; }}
+  hr {{ border-color: {SAGE}; }}
+  [data-testid="stMetricValue"] {{ color: {INK}; font-weight: 600; }}
+  [data-testid="stMetricLabel"] p {{ color: {SLATE} !important; font-weight: 600 !important; }}
+  [data-testid="stSliderTickBarMin"], [data-testid="stSliderTickBarMax"] {{ color: {SLATE}; }}
+</style>
+"""
+st.markdown(THEME, unsafe_allow_html=True)
 
 
 # --------------------------------------------------------------------------- caching
@@ -146,18 +269,43 @@ seed_state()
 # --------------------------------------------------------------------------- shared UI
 
 
-def step_header(number: int, title: str, question: str) -> None:
-    """Every step opens the same way: what it is, and the one question it answers."""
-    st.subheader(f"Step {number} · {title}")
-    st.markdown(f"**{question}**")
+STEP_TITLES = [
+    "Source files",
+    "Syllable layout",
+    "Translation",
+    "Note assignment",
+    "Output",
+]
+
+
+def step_header(number: int, instruction: str) -> None:
+    """Every step opens identically: its number and name, then what to do in it."""
+    st.subheader(f"Step {number} of 5 · {STEP_TITLES[number - 1]}")
+    st.markdown(
+        f'<div style="border-left:3px solid {SLATE};padding:2px 0 2px 12px;'
+        f'margin:-4px 0 14px 0;color:{INK};font-size:1.02rem;">{instruction}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def verdict(count: int, clean: str, todo: str) -> None:
-    """One banner per step: either nothing to do, or exactly what to do."""
+    """One status line per step: either the step is complete, or it names the work."""
     if count:
-        st.warning(f"**{count} to check.**  {todo}")
+        st.markdown(
+            f'<div style="background:#FBF0E6;border:1px solid {ATTENTION};border-radius:8px;'
+            f'padding:12px 14px;margin-bottom:14px;">'
+            f'<strong style="color:{ATTENTION};">{count} item(s) require review.</strong> '
+            f'<span style="color:{INK};">{todo}</span></div>',
+            unsafe_allow_html=True,
+        )
     else:
-        st.success(f"**Nothing to fix here.**  {clean}")
+        st.markdown(
+            f'<div style="background:{SAND};border:1px solid {SAGE};border-radius:8px;'
+            f'padding:12px 14px;margin-bottom:14px;">'
+            f'<strong style="color:{INK};">Step complete — no action required.</strong> '
+            f'<span style="color:{INK};">{clean}</span></div>',
+            unsafe_allow_html=True,
+        )
 
 
 def show_boxes(text: str) -> str:
@@ -178,56 +326,62 @@ def attention_table(rows: list[dict], caption: str) -> None:
 st.title("Multi-lingual Sheet Music Generator")
 
 with st.sidebar:
-    st.header("Your files")
+    st.header("Source files")
     round_ = st.session_state["upload_round"]
-    english_file = st.file_uploader("1. English score", type=["pdf"], key=f"english{round_}")
-    blank_file = st.file_uploader("2. Same score, no lyrics", type=["pdf"], key=f"blank{round_}")
-    layout_file = st.file_uploader("3. Syllable layout", type=["pdf"], key=f"layout{round_}")
+    english_file = st.file_uploader("1 · English score", type=["pdf"], key=f"english{round_}")
+    blank_file = st.file_uploader("2 · Score without lyrics", type=["pdf"], key=f"blank{round_}")
+    layout_file = st.file_uploader("3 · Syllable layout", type=["pdf"], key=f"layout{round_}")
     english_layout_file = st.file_uploader(
-        "4. English syllable layout — only if it is a separate file",
+        "4 · English syllable layout (only if supplied as a separate file)",
         type=["pdf"],
         key=f"english_layout{round_}",
     )
 
     st.divider()
-    st.header("How the syllables look")
-    max_size = st.slider("Maximum text size", 4.0, 12.0, 7.25, 0.25)
-    baseline = st.slider("Distance below the staff", 3.0, 14.0, 7.6, 0.1)
+    st.header("Type settings")
+    max_size = st.slider("Maximum type size", 4.0, 12.0, 7.25, 0.25)
+    baseline = st.slider("Distance below staff", 3.0, 14.0, 7.6, 0.1)
     font_choice = st.selectbox("Font", list(render_mod.BUNDLED_FONTS), index=0)
 
     st.divider()
     st.button(
-        "Start another project",
+        "Start a new project",
         on_click=start_another_project,
         width='stretch',
-        help="Clears the files, every correction you have made, and the finished PDF, "
-        "and takes you back to an empty upload screen.",
+        help="Clears all source files, all corrections and the generated PDF, and "
+        "returns to the upload screen.",
     )
 
 uploaded = {
-    "1. English score": (english_file, True, "The engraving with the English lyrics under the notes"),
-    "2. Same score, no lyrics": (blank_file, True, "The identical engraving with the lyrics removed"),
-    "3. Syllable layout": (layout_file, True, "The translator's document"),
-    "4. English syllable layout": (
+    "1 · English score": (english_file, True, "Engraved score with the English lyrics set under the notes"),
+    "2 · Score without lyrics": (blank_file, True, "The same engraving with the lyrics removed. Syllables are set onto this copy"),
+    "3 · Syllable layout": (layout_file, True, "The translator's document, one box per note"),
+    "4 · English syllable layout": (
         english_layout_file,
         False,
-        "Only needed if the English is not already in file 3",
+        "Required only when the English is not contained within file 3",
     ),
 }
 
 if not all(handle for handle, required, _ in uploaded.values() if required):
-    st.info("Upload the first three files in the sidebar to begin.")
+    st.markdown(
+        f'<div style="background:{SAND};border:1px solid {SAGE};border-radius:8px;'
+        f'padding:14px 16px;margin-bottom:16px;"><strong>To begin, upload files 1 to 3 '
+        f'using the panel on the left.</strong> File 4 is required only when the English '
+        f'syllable layout is supplied as a separate document.</div>',
+        unsafe_allow_html=True,
+    )
     st.dataframe(
         pd.DataFrame(
             [
                 {
                     "": ICONS["ok"] if handle else (ICONS["todo"] if required else ""),
                     "File": name,
-                    "What it is": description,
+                    "Description": description,
                     "Status": (
-                        "uploaded"
+                        "Received"
                         if handle
-                        else ("still needed" if required else "only if needed")
+                        else ("Required" if required else "Optional")
                     ),
                 }
                 for name, (handle, required, description) in uploaded.items()
@@ -250,7 +404,7 @@ def stop_with_a_way_out(title: str, detail: str) -> None:
     """Never leave the page dead. Anything unexpected still offers a fresh start."""
     st.error(f"**{title}**\n\n{detail}")
     st.button(
-        "Start another project",
+        "Start a new project",
         key=f"restart_{abs(hash(title)) % 10000}",
         on_click=start_another_project,
         type="primary",
@@ -298,9 +452,9 @@ if one_document:
 else:
     if not english_layout_file:
         st.error(
-            "**The English syllable layout is missing.** File 3 holds only one language, so "
-            "the app has nothing to match against the English in your score. Upload the "
-            "English layout as file 4, or upload a file 3 that contains both languages."
+            "**The English syllable layout is missing.** File 3 contains only one language, "
+            "leaving nothing to match against the English in the score. Supply the English "
+            "layout as file 4, or supply a file 3 containing both languages."
         )
         st.stop()
     try:
@@ -411,49 +565,77 @@ pair_state = "warn" if pair_trouble else "ok"
 notes_state = "warn" if (mismatched_lines or empty_notes or unmapped_sections) else "ok"
 ready_state = "ok" if st.session_state.get("result_pdf") else "todo"
 
-steps = [
-    ("Score", score_state),
-    ("Syllables", layout_state),
-    ("Translation", pair_state),
-    ("Notes", notes_state),
-    ("PDF", ready_state),
+states = [score_state, layout_state, pair_state, notes_state, ready_state]
+outstanding = [
+    index for index, state in enumerate(states, start=1) if state in ("warn", "err")
 ]
-tabs = st.tabs([f"{ICONS[state]}  {i} · {name}" for i, (name, state) in enumerate(steps, 1)])
+
+st.markdown(
+    f'<p style="color:{SLATE};margin:-4px 0 12px 0;font-size:1.03rem;">'
+    "Complete the five steps in order. Each step reports whether it needs attention; "
+    "the score is generated in Step 5.</p>",
+    unsafe_allow_html=True,
+)
+if outstanding:
+    st.markdown(
+        f'<div style="background:#FBF0E6;border:1px solid {ATTENTION};border-radius:8px;'
+        f'padding:11px 15px;margin-bottom:12px;color:{INK};">'
+        f'<strong style="color:{ATTENTION};">Requires review: '
+        f'{"Step " + ", ".join(str(n) for n in outstanding)}.</strong> '
+        "Open each step listed and resolve the items shown.</div>",
+        unsafe_allow_html=True,
+    )
+else:
+    st.markdown(
+        f'<div style="background:{SAND};border:1px solid {SAGE};border-radius:8px;'
+        f'padding:11px 15px;margin-bottom:12px;color:{INK};">'
+        "<strong>All checks passed.</strong> Review each step if required, then generate "
+        "the score in Step 5.</div>",
+        unsafe_allow_html=True,
+    )
+
+LABELS = {"ok": "Reviewed", "warn": "Needs review", "err": "Not valid", "todo": "Not started"}
+tabs = st.tabs(
+    [
+        f"{index}  {STEP_TITLES[index - 1]}\n\n{ICONS[state]} {LABELS[state]}"
+        for index, state in enumerate(states, start=1)
+    ]
+)
 tab_score, tab_lines, tab_pairs, tab_match, tab_make = tabs
 
 
 # --------------------------------------------------------------------------- 1 · Score
 
 with tab_score:
-    step_header(1, "Score", "Did the app read your two score PDFs correctly?")
+    step_header(1, "Confirm that both score files were read correctly, then continue to Step 2.")
     verdict(
         len(geometry_problems),
-        "The two scores are the same engraving, so every syllable will land on a note.",
-        "The scores below do not line up. Syllables cannot be placed until this is fixed.",
+        "Both files are the same engraving, so every syllable will align to a note.",
+        "The two files do not align. Syllables cannot be placed until this is resolved.",
     )
     for problem in geometry_problems:
         st.error(problem)
 
     left, middle, right = st.columns(3)
     with left:
-        st.markdown("**The score**")
+        st.markdown("**Score**")
         st.metric("Pages", score_doc.page_count)
         st.metric("Voice parts", len(score_doc.voices))
         st.metric("Notes to fill", len(score_doc.anchors))
     with middle:
-        st.markdown("**Read from the score**")
+        st.markdown("**Detected in the score**")
         st.write("Sections")
         st.write(", ".join(score_sections) if score_sections else "_none found_")
         st.write("Voices")
         st.write(", ".join(score_doc.voices))
     with right:
-        st.markdown("**Read from the layout**")
+        st.markdown("**Detected in the layout**")
         st.metric("English lines", len(english_lines))
         st.metric("Translated lines", len(working_lines))
         st.write(
-            "Both languages were found in file 3."
+            "Both languages were found within file 3."
             if one_document
-            else "English from file 4, translation from file 3."
+            else "English taken from file 4; translation from file 3."
         )
 
     warnings = list(score_doc.warnings)
@@ -461,7 +643,7 @@ with tab_score:
     if english_layout_doc is not None:
         warnings += [f"English layout: {w}" for w in english_layout_doc.warnings]
     if warnings:
-        st.markdown("**Worth knowing**")
+        st.markdown("**Notices**")
         for warning in warnings:
             st.warning(warning)
 
@@ -469,22 +651,22 @@ with tab_score:
 # --------------------------------------------------------------------------- 2 · Syllables
 
 with tab_lines:
-    step_header(2, "Syllables", "Did the app read the translator's document correctly?")
+    step_header(2, "Confirm that the translator's document was read correctly, then continue to Step 3.")
     verdict(
         len(layout_trouble),
-        "Every line in the translated layout was read as a row of syllables.",
-        "These lines came through empty. Type the syllables in, or untick Use to leave them out.",
+        "Every line of the layout was read as a row of syllables.",
+        "The lines below were read as empty. Enter the syllables, or clear Use to omit the line.",
     )
     attention_table(
         [{"Page": line.page + 1, "Section": line.section, "Line": line.text or "(empty)"}
          for line in layout_trouble],
-        "Lines to look at",
+        "Lines requiring review",
     )
 
     st.markdown("---")
     st.markdown(
-        "**One box per note.** Delete the space between two syllables to sing them on one "
-        "note; add a space to split them again. Untick **Use** to leave a line out."
+        "**One box per note.** Remove the space between two syllables to set them on a single "
+        "note; add a space to separate them again. Clear **Use** to omit a line entirely."
     )
 
     frame = pd.DataFrame(
@@ -543,12 +725,12 @@ with tab_lines:
         int(r["_id"]) for _, r in edited.iterrows() if not r["Use"]
     }
     if changed:
-        st.info(f"{changed} line(s) edited. Everything after this step uses your version.")
+        st.info(f"{changed} line(s) edited. All later steps use the edited text.")
 
-    with st.expander("Advanced — where the translation sits in the document", expanded=False):
+    with st.expander("Advanced · Where the translation sits within the document", expanded=False):
         st.write(
-            "The app tried each way of reading the file and kept whichever matched the English "
-            "best. Change it only if the table above is reading the wrong text."
+            "Each reading of the file was tested and the closest match to the English retained. "
+            "Change this only if the table above shows the wrong text."
         )
         if style_scores:
             st.dataframe(
@@ -572,8 +754,8 @@ with tab_lines:
             horizontal=True,
         )
 
-    with st.expander("Advanced — the English layout, as the app read it", expanded=False):
-        st.write("Edit a line here only if the app misread the original English document.")
+    with st.expander("Advanced · The English layout as it was read", expanded=False):
+        st.write("Edit a line here only if the original English document was misread.")
         english_frame = pd.DataFrame(
             [
                 {
@@ -620,12 +802,12 @@ STATUS_TEXT = {
 }
 
 with tab_pairs:
-    step_header(3, "Translation", "Is each English line sitting beside the right translation?")
+    step_header(3, "Confirm that each English line is matched to the correct translation, then continue to Step 4.")
     verdict(
         len(pair_trouble),
-        "Every English line has a translation opposite it with the same number of syllables.",
-        "Check the rows below. Where the counts differ, join two syllables by deleting the "
-        "space between them, or split one by adding a space.",
+        "Every English line is matched to a translation with the same number of syllables.",
+        "Review the rows below. Where the counts differ, set two syllables on one note by "
+        "removing the space between them, or separate them by adding a space.",
     )
     attention_table(
         [
@@ -639,15 +821,15 @@ with tab_pairs:
             }
             for pair in pair_trouble
         ],
-        "Lines to look at",
+        "Lines requiring review",
     )
     for note in pair_result.notes:
         st.info(note)
 
     st.markdown("---")
     st.markdown(
-        f"**{pair_result.confidence:.0%} of lines paired cleanly.** "
-        "Type over anything in the **Translation** column to correct it."
+        f"**{pair_result.confidence:.0%} of lines matched without ambiguity.** "
+        "Overwrite any entry in the **Translation** column to correct it."
     )
 
     pair_frame = pd.DataFrame(
@@ -700,11 +882,11 @@ with tab_pairs:
 
     # ------------------------------------------------------------------ one line, note by note
     st.markdown("---")
-    st.markdown("**Work on one line, note by note**")
+    st.markdown("**Edit a single line, note by note**")
     st.write(
-        "One row per note, with the English word that sits on it. Type the syllable straight "
-        "into the box. Two syllables in one box are sung on that one note; an empty box leaves "
-        "the note held. A change here applies to **every voice that sings this line**."
+        "One row per note, showing the English word set on it. Enter the syllable directly into "
+        "the box. Two syllables in one box are sung on that note; an empty box leaves the note "
+        "held. An edit here applies to **every voice that sings this line**."
     )
 
     english_by_id = {line.id: line for line in english_lines}
@@ -722,15 +904,15 @@ with tab_pairs:
             return f"[{line.section or '—'}]  {show_boxes(line.text)[:52]}   ({voices}){mark}"
 
         picked = st.selectbox(
-            "Line to work on", choices, format_func=line_label, key="grid_line"
+            "Select a line to edit", choices, format_func=line_label, key="grid_line"
         )
         english_line = english_by_id[picked]
         current = translation.get(picked, [])
         singers = sorted(voices_by_layout_line.get(picked, ()))
 
         st.caption(
-            ("Sung by " + ", ".join(singers)) if singers
-            else "No voice is singing this line at the moment."
+            ("Sung by: " + ", ".join(singers)) if singers
+            else "No voice is currently assigned to this line."
         )
 
         grid = pd.DataFrame(
@@ -738,7 +920,7 @@ with tab_pairs:
                 {
                     "Note": index + 1,
                     "English": (
-                        "▫ held" if token == layout_mod.BLANK_BOX else token
+                        "▫  held note" if token == layout_mod.BLANK_BOX else token
                     ),
                     "Syllable": (current[index] if index < len(current) else ""),
                 }
@@ -753,10 +935,10 @@ with tab_pairs:
             column_config={
                 "Note": st.column_config.NumberColumn(width="small", disabled=True),
                 "English": st.column_config.TextColumn(
-                    width="medium", disabled=True, help="The English sung on this note"
+                    width="medium", disabled=True, help="The English word set on this note"
                 ),
                 "Syllable": st.column_config.TextColumn(
-                    width="medium", help="Leave empty to sing nothing new on this note"
+                    width="medium", help="Leave empty to hold the previous syllable across this note"
                 ),
             },
             key=f"grid_editor_{picked}",
@@ -767,27 +949,27 @@ with tab_pairs:
             st.info(
                 "Saved. "
                 + (f"Applied to {len(singers)} voice(s): " + ", ".join(singers) if singers
-                   else "No voice sings this line yet.")
+                   else "No voice is currently assigned to this line.")
             )
+
 
 
 # --------------------------------------------------------------------------- 4 · Notes
 
 with tab_match:
-    step_header(4, "Notes", "Is every note getting the syllable it should?")
+    step_header(4, "Confirm that every note receives the correct syllable, then continue to Step 5.")
     verdict(
         len(mismatched_lines) + len(unmapped_sections) + (1 if empty_notes else 0),
-        "Every note has a syllable on it and every section is accounted for.",
-        f"{empty_notes} note(s) would be left empty. Pick the voice below and type the "
-        "syllables in — you can still make the PDF either way.",
+        "Every note carries a syllable and every section is accounted for.",
+        f"{empty_notes} note(s) would be left empty. Select the voice below and enter the "
+        "syllables. The PDF can be generated either way.",
     )
 
     if unmapped_sections:
         st.error(
-            "**Not every section is placed:** "
+            "**Unplaced sections:** "
             + ", ".join(f"`{name}`" for name in unmapped_sections)
-            + ". Open *Which part of the score each section is sung in* below and tick where "
-            "each one belongs."
+            + ". Open *Section placement* below and select where each one is sung."
         )
 
     attention_table(
@@ -802,20 +984,17 @@ with tab_match:
             }
             for voice_name, assignment, given, need in mismatched_lines[:25]
         ],
-        "Lines to look at",
+        "Lines requiring review",
     )
     if len(mismatched_lines) > 25:
         st.caption(f"...and {len(mismatched_lines) - 25} more.")
 
     st.markdown("---")
 
-    with st.expander(
-        "Which part of the score each section is sung in",
-        expanded=bool(unmapped_sections),
-    ):
+    with st.expander("Section placement", expanded=bool(unmapped_sections)):
         st.write(
-            "A section written once in the layout can be sung several times in the score — one "
-            "**Ch** block covering Chorus 1, 2 and 3. Tick every place it is sung."
+            "A section written once in the layout may be sung several times in the score — a "
+            "single **Ch** block covering Chorus 1, 2 and 3. Select every place it is sung."
         )
         if ordered_sections:
             grid = st.columns(min(3, len(ordered_sections)))
@@ -839,14 +1018,14 @@ with tab_match:
         "Voices to leave in English",
         score_doc.voices,
         key="skip_voices",
-        help="Anything selected here is skipped entirely and keeps no lyrics.",
+        help="Voices selected here are omitted entirely and carry no lyrics.",
     )
 
     if not plans:
         st.error("Every voice has been left in English. Untick one above to continue.")
         st.stop()
 
-    st.markdown("**Every voice at a glance**")
+    st.markdown("**Summary by voice**")
     st.dataframe(
         pd.DataFrame(
             [
@@ -871,22 +1050,22 @@ with tab_match:
     )
 
     st.markdown("---")
-    voice = st.selectbox("Voice to review line by line", list(plans), key="review_voice")
+    voice = st.selectbox("Select a voice to review", list(plans), key="review_voice")
     plan = plans[voice]
     st.markdown(
-        "**The English printed in the score, and the syllables going onto those same notes.**"
+        "**The English printed in the score, beside the syllables set on the same notes.**"
     )
     solo = st.checkbox(
-        f"Give {voice} different words from the other voices",
+        f"Assign different words to {voice} only",
         key=f"solo_{voice}",
-        help="Off: correct the words on Step 3 and every voice singing that line follows. "
-        "On: whatever you type here applies to this voice only.",
+        help="Cleared: edit the words in Step 3 and every voice singing that line follows. "
+        "Selected: entries made here apply to this voice alone.",
     )
     if not solo:
         st.caption(
-            "To change a syllable, use **Step 3** — the correction is made once and every "
-            "voice singing that line picks it up. Tick the box above only if this voice "
-            "genuinely sings something different."
+            "To change a syllable, use **Step 3**. The correction is made once and applies to "
+            "every voice singing that line. Select the option above only where this voice sings "
+            "different words."
         )
 
     rows = []
@@ -949,7 +1128,7 @@ with tab_match:
 
     unresolved = [a.note for a in plan.assignments if a.note]
     if unresolved:
-        with st.expander(f"What the app could not work out for {voice}", expanded=False):
+        with st.expander(f"Unresolved items for {voice}", expanded=False):
             for text in dict.fromkeys(unresolved):
                 st.write("- " + text)
 
@@ -957,7 +1136,7 @@ with tab_match:
 # --------------------------------------------------------------------------- 5 · PDF
 
 with tab_make:
-    step_header(5, "PDF", "Make the finished score.")
+    step_header(5, "Generate the finished score and download it.")
 
     placements: dict[int, list[str]] = {}
     held_notes: dict[int, list[tuple]] = {}
@@ -973,7 +1152,7 @@ with tab_make:
                         "Page": assignment.page + 1,
                         "Notes": need,
                         "Syllables given": len(tokens),
-                        "What happens": f"the last {len(tokens) - need} will be left off",
+                        "Result": f"the final {len(tokens) - need} will be omitted",
                     }
                 )
                 tokens = tokens[:need]
@@ -984,7 +1163,7 @@ with tab_make:
                         "Page": assignment.page + 1,
                         "Notes": need,
                         "Syllables given": len(tokens),
-                        "What happens": f"{need - len(tokens)} note(s) will be left empty",
+                        "Result": f"{need - len(tokens)} note(s) will remain empty",
                     }
                 )
                 tokens = tokens + [""] * (need - len(tokens))
@@ -998,16 +1177,16 @@ with tab_make:
 
     left, right = st.columns([1, 2])
     with left:
-        st.metric("Notes that will carry a syllable", f"{total - blank} of {total}")
+        st.metric("Notes carrying a syllable", f"{total - blank} of {total}")
     with right:
         verdict(
             len(issues),
             "Every note will carry a syllable.",
-            "These lines will still be written, with the gaps shown below. "
-            "Go back to Step 4 to fill them, or carry on.",
+            "The lines below will still be written, with the gaps shown. Return to Step 4 to "
+            "complete them, or proceed.",
         )
 
-    attention_table(issues[:15], "What will not be filled")
+    attention_table(issues[:15], "Notes that will remain empty")
     if len(issues) > 15:
         st.caption(f"...and {len(issues) - 15} more.")
 
@@ -1021,16 +1200,21 @@ with tab_make:
                 score_doc, blank_bytes, placements, settings, held_notes
             )
         except Exception as error:  # noqa: BLE001
-            st.error(f"**The PDF could not be made.**\n\n{error}")
+            st.error(f"**The PDF could not be generated.**\n\n{error}")
 
     if st.session_state.get("result_pdf"):
         result = st.session_state["result_pdf"]
-        st.success("**Your score is ready.**")
+        st.markdown(
+            f'<div style="background:{SAND};border:1px solid {SAGE};border-radius:8px;'
+            f'padding:12px 14px;margin:6px 0 14px 0;"><strong>The score is ready to '
+            f'download.</strong></div>',
+            unsafe_allow_html=True,
+        )
 
         first, second = st.columns(2)
         with first:
             st.download_button(
-                "Download the finished score (PDF)",
+                "Download the score (PDF)",
                 result,
                 "translated_score.pdf",
                 "application/pdf",
@@ -1049,7 +1233,7 @@ with tab_make:
                         f'"{english}","{text}"\n'
                     )
             st.download_button(
-                "Download a checking sheet (CSV)",
+                "Download the proofing sheet (CSV)",
                 report.getvalue().encode("utf-8"),
                 "alignment_report.csv",
                 "text/csv",
@@ -1060,17 +1244,16 @@ with tab_make:
         import pymupdf as fitz
 
         pages = fitz.open(stream=result, filetype="pdf").page_count
-        page_pick = st.number_input("Page", 1, pages, 1)
+        page_pick = st.number_input(f"Preview page (1 to {pages})", 1, pages, 1)
         st.image(render_mod.page_image(result, int(page_pick) - 1, 2.0), width='stretch')
 
         st.divider()
-        st.markdown("**Finished with this one?**")
+        st.markdown("**Finished with this score?**")
         st.button(
-            "Start another project",
+            "Start a new project",
             key="restart_after_download",
             on_click=start_another_project,
-            type="primary",
             width='stretch',
-            help="Download anything you want to keep first — this clears the files, your "
-            "corrections and the PDF.",
+            help="Download anything required before continuing. This clears all source files, "
+            "corrections and the generated PDF.",
         )
