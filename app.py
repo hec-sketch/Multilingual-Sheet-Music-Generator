@@ -53,15 +53,29 @@ THEME = f"""
   .stApp {{ background: {PAPER}; }}
   section[data-testid="stSidebar"] {{
       background: {SAND}; border-right: 1px solid {SAGE};
+      box-shadow: 2px 0 12px rgba(47,61,75,.06);
   }}
   h1 {{
-      font-weight: 600; letter-spacing: -.02em; color: {INK};
-      border-bottom: 3px solid {SAGE}; padding-bottom: .5rem; margin-bottom: .3rem;
+      font-weight: 700; letter-spacing: -.02em; color: {INK};
+      border-bottom: 2px solid {SLATE}; padding-bottom: .55rem; margin-bottom: .4rem;
   }}
   h2, h3 {{ font-weight: 600; letter-spacing: -.01em; color: {INK}; }}
   [data-testid="stWidgetLabel"] p {{
       font-weight: 600 !important; color: {INK} !important; font-size: .9rem !important;
   }}
+  hr {{ border-color: {SAGE}; opacity: .55; }}
+
+  /* --- Status banners: one component, used everywhere a verdict or a notice is
+         shown, so every banner in the app looks and behaves identically. --- */
+  .smg-banner {{
+      border: 1px solid {SAGE}; border-radius: 8px; padding: 12px 16px;
+      margin-bottom: 14px; color: {INK}; box-shadow: 0 1px 3px rgba(47,61,75,.06);
+  }}
+  .smg-banner strong {{ color: {INK}; }}
+  .smg-banner--ok {{ background: {MOSS}; border-left: 5px solid {SAGE}; }}
+  .smg-banner--attn {{ background: {TAN}; border-left: 5px solid {INK}; }}
+  .smg-banner--info {{ background: {MOSS}; }}
+  .smg-icon {{ display: inline-block; width: 1.1em; text-align: center; margin-right: 4px; }}
 
   /* --- Controls that open. The default styling is a faint underline that is easy
          to miss, so every one gets a solid field, a border and a boxed chevron. --- */
@@ -95,12 +109,29 @@ THEME = f"""
       font-weight: 500; color: {INK} !important; padding-left: 12px !important;
   }}
 
+  /* --- Sliders. Locked to the palette explicitly rather than left to inherit
+         Streamlit's theme, so a slider never shows an off-palette accent colour
+         regardless of which theme a browser or a hosting platform applies. --- */
+  [data-testid="stSlider"] [data-orientation="horizontal"][style] > div:first-child {{
+      background: {SAGE} !important; height: 4px !important; border-radius: 4px !important;
+  }}
+  [data-testid="stSlider"] [data-orientation="horizontal"] > div[style*="position: absolute"] {{
+      background: {SLATE} !important; border: 2px solid #FFFFFF !important;
+      box-shadow: 0 1px 3px rgba(47,61,75,.35) !important;
+  }}
+  [data-testid="stSlider"] [data-testid="stSliderThumbValue"] p {{
+      color: {SLATE} !important; font-weight: 700 !important;
+  }}
+  input[type="range"], input[type="checkbox"], input[type="radio"] {{ accent-color: {SLATE}; }}
+
   /* --- Upload boxes read as drop targets. --- */
   [data-testid="stFileUploaderDropzone"] {{
       background: #FFFFFF; border: 1.5px dashed {SLATE};
       border-radius: 10px; padding: 14px 16px;
+      box-shadow: 0 1px 2px rgba(47,61,75,.05);
+      transition: background .12s ease, border-color .12s ease;
   }}
-  [data-testid="stFileUploaderDropzone"]:hover {{ background: {PAPER}; }}
+  [data-testid="stFileUploaderDropzone"]:hover {{ background: {PAPER}; border-color: {INK}; }}
 
   /* --- The five steps. Each one is a button holding its own state, so the step on
          screen is remembered and a change made anywhere else does not move it. --- */
@@ -108,9 +139,9 @@ THEME = f"""
       width: 100%; justify-content: flex-start !important; align-items: flex-start !important;
       flex-direction: column !important; text-align: left; line-height: 1.3;
       border: 1px solid {SAGE} !important; border-left: 4px solid {SLATE} !important;
-      border-radius: 6px !important; padding: 10px 12px 11px 13px !important;
+      border-radius: 8px !important; padding: 10px 12px 11px 13px !important;
       min-height: 68px; height: auto !important; font-weight: 600;
-      transition: background .12s ease;
+      transition: background .12s ease, box-shadow .12s ease, transform .08s ease;
   }}
   [class*="st-key-step_btn_"] button p {{ margin: 0 !important; font-size: .9rem; }}
   [class*="st-key-step_btn_"] button p + p {{
@@ -128,11 +159,11 @@ THEME = f"""
       background: #FFFFFF; color: {INK} !important;
   }}
   [class*="st-key-step_btn_"] [data-testid="stBaseButton-secondary"]:hover {{
-      background: {MOSS};
+      background: {MOSS}; box-shadow: 0 2px 6px rgba(47,61,75,.1); transform: translateY(-1px);
   }}
   [class*="st-key-step_btn_"] [data-testid="stBaseButton-primary"] {{
       background: {SLATE} !important; border-color: {SLATE} !important;
-      border-left-color: {INK} !important;
+      border-left-color: {INK} !important; box-shadow: 0 2px 8px rgba(47,61,75,.18);
   }}
   [class*="st-key-step_btn_"] [data-testid="stBaseButton-primary"] * {{ color: #FFFFFF !important; }}
 
@@ -140,23 +171,35 @@ THEME = f"""
   [data-testid="stBaseButton-secondary"], [data-testid="stBaseButton-primary"] {{
       border-radius: 8px; font-weight: 600; min-height: 44px;
       border: 1.5px solid {SLATE};
+      transition: background .12s ease, box-shadow .12s ease, transform .08s ease, border-color .12s ease;
   }}
   [data-testid="stBaseButton-primary"] {{
       background: {SLATE}; border-color: {SLATE}; color: #FFFFFF;
+      box-shadow: 0 2px 6px rgba(47,61,75,.18);
   }}
-  [data-testid="stBaseButton-primary"]:hover {{ background: {INK}; border-color: {INK}; }}
-  [data-testid="stBaseButton-secondary"]:hover {{ background: {MOSS}; }}
+  [data-testid="stBaseButton-primary"]:hover {{
+      background: {INK}; border-color: {INK};
+      transform: translateY(-1px); box-shadow: 0 4px 12px rgba(47,61,75,.24);
+  }}
+  [data-testid="stBaseButton-secondary"]:hover {{
+      background: {MOSS}; transform: translateY(-1px); box-shadow: 0 2px 6px rgba(47,61,75,.1);
+  }}
+  [data-testid="stBaseButton-primary"]:active, [data-testid="stBaseButton-secondary"]:active {{
+      transform: translateY(0); box-shadow: none;
+  }}
 
   /* --- Tables and panels --- */
   [data-testid="stDataFrame"], [data-testid="stDataEditor"] {{
-      border: 1px solid {SAGE}; border-radius: 8px; overflow: hidden;
+      border: 1px solid {SAGE}; border-radius: 10px; overflow: hidden;
+      box-shadow: 0 1px 3px rgba(47,61,75,.06);
   }}
   [data-testid="stExpander"] {{
-      border: 1px solid {SAGE}; border-radius: 8px; background: #FFFFFF;
+      border: 1px solid {SAGE}; border-radius: 10px; background: #FFFFFF;
+      box-shadow: 0 1px 2px rgba(47,61,75,.05);
   }}
   [data-testid="stExpander"] summary {{ font-weight: 600; color: {INK}; }}
   hr {{ border-color: {SAGE}; }}
-  [data-testid="stMetricValue"] {{ color: {INK}; font-weight: 600; }}
+  [data-testid="stMetricValue"] {{ color: {INK}; font-weight: 700; }}
   [data-testid="stMetricLabel"] p {{ color: {SLATE} !important; font-weight: 600 !important; }}
   [data-testid="stSliderTickBarMin"], [data-testid="stSliderTickBarMax"] {{ color: {SLATE}; }}
 </style>
@@ -321,18 +364,16 @@ def verdict(count: int, clean: str, todo: str) -> None:
     """One status line per step: either the step is complete, or it names the work."""
     if count:
         st.markdown(
-            f'<div style="background:{TAN};border:1px solid {SAGE};border-left:5px solid {INK};'
-            f'border-radius:6px;padding:12px 15px;margin-bottom:14px;">'
-            f'<strong style="color:{INK};">{count} item(s) to check.</strong> '
-            f'<span style="color:{INK};">{todo}</span></div>',
+            f'<div class="smg-banner smg-banner--attn">'
+            f'<span class="smg-icon">{ICONS["warn"]}</span>'
+            f'<strong>{count} item(s) to check.</strong> {todo}</div>',
             unsafe_allow_html=True,
         )
     else:
         st.markdown(
-            f'<div style="background:{MOSS};border:1px solid {SAGE};border-left:5px solid {SAGE};'
-            f'border-radius:6px;padding:12px 15px;margin-bottom:14px;">'
-            f'<strong style="color:{INK};">Nothing to change here.</strong> '
-            f'<span style="color:{INK};">{clean}</span></div>',
+            f'<div class="smg-banner smg-banner--ok">'
+            f'<span class="smg-icon">{ICONS["ok"]}</span>'
+            f'<strong>Nothing to change here.</strong> {clean}</div>',
             unsafe_allow_html=True,
         )
 
@@ -414,10 +455,10 @@ uploaded = {
 
 if not all(handle for handle, required, _ in uploaded.values() if required):
     st.markdown(
-        f'<div style="background:{MOSS};border:1px solid {SAGE};border-radius:6px;'
-        f'padding:14px 16px;margin-bottom:16px;"><strong>To begin, upload files 1 to 3 '
-        f'using the panel on the left.</strong> File 4 is required only when the English '
-        f'syllable layout is supplied as a separate document.</div>',
+        f'<div class="smg-banner smg-banner--info">'
+        f'<strong>To begin, upload files 1 to 3 using the panel on the left.</strong> '
+        f'File 4 is required only when the English syllable layout is supplied as a '
+        f'separate document.</div>',
         unsafe_allow_html=True,
     )
     st.dataframe(
@@ -453,8 +494,8 @@ def stop_with_a_way_out(title: str, detail: str) -> None:
     """Never leave the page dead. The sidebar is drawn first, so its reset button is
     still on screen — say so rather than adding a second one beside it."""
     st.markdown(
-        f'<div style="background:{TAN};border:1px solid {SAGE};border-left:5px solid {INK};'
-        f'border-radius:6px;padding:14px 16px;"><strong>{title}</strong>'
+        f'<div class="smg-banner smg-banner--attn">'
+        f'<span class="smg-icon">{ICONS["err"]}</span><strong>{title}</strong>'
         f'<div style="margin-top:6px;">{detail}</div>'
         f'<div style="margin-top:10px;">Supply a different file, or use '
         f'<strong>Start a new project</strong> in the panel on the left.</div></div>',
@@ -629,17 +670,17 @@ st.markdown(
 )
 if outstanding:
     st.markdown(
-        f'<div style="background:{TAN};border:1px solid {SAGE};border-left:5px solid {INK};'
-        f'border-radius:6px;padding:11px 15px;margin-bottom:12px;color:{INK};">'
-        f'<strong style="color:{INK};">Needs your attention: '
+        f'<div class="smg-banner smg-banner--attn">'
+        f'<span class="smg-icon">{ICONS["warn"]}</span>'
+        f'<strong>Needs your attention: '
         f'{"Step " + ", ".join(str(n) for n in outstanding)}.</strong> '
         "Open each of those steps and check the items listed there.</div>",
         unsafe_allow_html=True,
     )
 else:
     st.markdown(
-        f'<div style="background:{MOSS};border:1px solid {SAGE};border-left:5px solid {SAGE};'
-        f'border-radius:6px;padding:11px 15px;margin-bottom:12px;color:{INK};">'
+        f'<div class="smg-banner smg-banner--ok">'
+        f'<span class="smg-icon">{ICONS["ok"]}</span>'
         "<strong>Nothing needs attention.</strong> Look through the steps if you wish, "
         "then generate the score in Step 5.</div>",
         unsafe_allow_html=True,
@@ -1302,19 +1343,19 @@ if step == 5:
             )
         except Exception as error:  # noqa: BLE001
             st.markdown(
-                f'<div style="background:{TAN};border:1px solid {SAGE};border-left:5px solid {INK};'
-                f'border-radius:6px;padding:12px 15px;"><strong>The score could not be '
-                f'generated.</strong> {error}</div>',
+                f'<div class="smg-banner smg-banner--attn">'
+                f'<span class="smg-icon">{ICONS["err"]}</span>'
+                f'<strong>The score could not be generated.</strong> {error}</div>',
                 unsafe_allow_html=True,
             )
         st.session_state["result_pdf"] = result
 
     if result:
         st.markdown(
-            f'<div style="background:{MOSS};border:1px solid {SAGE};border-left:5px solid {SAGE};'
-            f'border-radius:6px;padding:12px 14px;margin:6px 0 14px 0;"><strong>The score is '
-            f'ready to download.</strong> Type size, spacing and font can be adjusted in the '
-            f'panel on the left.</div>',
+            f'<div class="smg-banner smg-banner--ok">'
+            f'<span class="smg-icon">{ICONS["ok"]}</span>'
+            f'<strong>The score is ready to download.</strong> Type size, spacing and font '
+            f'can be adjusted in the panel on the left.</div>',
             unsafe_allow_html=True,
         )
 
