@@ -7,11 +7,13 @@ Takes a translated syllable layout and writes it under the notes of an engraved 
 | File | What it is | |
 | --- | --- | --- |
 | **1. English score** | The engraved score with the English lyrics under the notes | required |
-| **2. Same score, no lyrics** | The identical engraving with the lyrics removed — this is the canvas | required |
-| **3. Syllable layout** | The translator's document, line by line | required |
+| **2. Same score, no lyrics** | The identical engraving with the lyrics removed — this is the canvas | made from file 1 if you do not have it |
+| **3. Syllable layout or lyrics sheet** | The translator's document, line by line | required |
 | **4. English syllable layout** | The same layout before it was translated | only if it is a separate file |
 
 It returns the no-lyrics score with the translated syllables placed on the notes.
+
+**The least you can supply is files 1 and 3.** Everything else is worked out from those two.
 
 **One file or two.** Some translators keep the English layout and the translated one in a single
 document — facing halves, or one under the other. Others keep them as two files. Either works,
@@ -23,6 +25,41 @@ close call. Step 1 tells you which it found.
 Where the two languages sit in one document, the translator has already lined each translated
 line up with its English one, so the app does not have to work that out: pairing is exact rather
 than a sequence match.
+
+### When file 2 is missing
+
+The no-lyrics score is the canvas the syllables are drawn onto. If you were never sent one, the
+app makes it: it deletes the lyric text from file 1 and leaves everything else — staves, notes,
+slurs, dynamics, section labels — exactly as engraved. It knows which text to delete because it
+is the same text it already turned into syllable slots.
+
+Scored against the same hand-made Aymara score, the derived canvas gives **112 / 112 (100%)** —
+the same as being handed the engraver's own no-lyrics export. Use theirs when you have it; you
+lose nothing when you don't.
+
+### When file 3 is a plain lyrics sheet
+
+Not every translator produces a grid with one box per note. Some send an ordinary page of words,
+hyphenated at the syllable breaks, under section headings:
+
+```
+Chorus 1
+Via-hi vi nji vui-la lio-va
+Ye-ho-va ali na-nge;
+```
+
+That is enough. The app recognises the format on sight — headings spelled out in words, hyphens
+inside words — and switches to it without being told. It then takes from the score what the grid
+would have supplied: the English is cut into lines at the engraver's own punctuation, and those
+lines are matched to the translator's written lines by section, order and syllable count.
+
+A grid is still the better input where one exists, because it states which syllable belongs on
+which note instead of leaving that to be worked out. The app prefers a grid whenever it can read
+one, and only reads a sheet as prose when there is no grid to read.
+
+Where a written line and its sung phrase disagree on how many syllables there are — usually a
+word the translator left un-hyphenated — the line is matched anyway and listed in Step 3 for you
+to correct. Nothing is invented to make the counts agree.
 
 ---
 

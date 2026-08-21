@@ -16,7 +16,9 @@ import pandas as pd
 import streamlit as st
 
 from smgcore import align as aligner
+from smgcore import blankscore as blank_mod
 from smgcore import layout as layout_mod
+from smgcore import lyricsdoc as lyrics_mod
 from smgcore import pairing as pairing_mod
 from smgcore import render as render_mod
 from smgcore import score as score_mod
@@ -225,6 +227,21 @@ def geometry_cached(_score_doc, blank: bytes, key: str):
     return render_mod.check_geometry(_score_doc, blank)
 
 
+@st.cache_data(show_spinner="Making the no-lyrics score...", max_entries=4)
+def blank_from_score_cached(_score_doc, score_bytes: bytes, key: str):
+    return blank_mod.strip_lyrics(score_bytes, _score_doc)
+
+
+@st.cache_data(show_spinner="Reading the lyrics sheet...", max_entries=4)
+def lyrics_cached(data: bytes):
+    return lyrics_mod.parse_lyrics_document(data)
+
+
+@st.cache_data(show_spinner="Matching the lyrics to the score...", max_entries=4)
+def from_lyrics_cached(_score_doc, _lyrics_doc, key: str):
+    return lyrics_mod.build_from_lyrics(_score_doc, _lyrics_doc)
+
+
 @st.cache_data(show_spinner="Working out how the layout is written...", max_entries=4)
 def style_cached(_layout_doc, _score_doc, _english_lines, key: str):
     return aligner.choose_style(_layout_doc, _score_doc, STYLE_OPTIONS, _english_lines)
@@ -399,8 +416,13 @@ with st.sidebar:
     st.header("Source files")
     round_ = st.session_state["upload_round"]
     english_file = st.file_uploader("1 · English score", type=["pdf"], key=f"english{round_}")
-    blank_file = st.file_uploader("2 · Score without lyrics", type=["pdf"], key=f"blank{round_}")
-    layout_file = st.file_uploader("3 · Syllable layout", type=["pdf"], key=f"layout{round_}")
+    blank_file = st.file_uploader(
+        "2 · Score without lyrics (optional)", type=["pdf"], key=f"blank{round_}"
+    )
+    st.caption("Leave empty to have it made from file 1.")
+    layout_file = st.file_uploader(
+        "3 · Syllable layout or lyrics sheet", type=["pdf", "txt"], key=f"layout{round_}"
+    )
     english_layout_file = st.file_uploader(
         "4 · English syllable layout (only if supplied as a separate file)",
         type=["pdf"],
@@ -444,8 +466,8 @@ with st.sidebar:
 
 uploaded = {
     "1 · English score": (english_file, True, "Engraved score with the English lyrics set under the notes"),
-    "2 · Score without lyrics": (blank_file, True, "The same engraving with the lyrics removed. Syllables are set onto this copy"),
-    "3 · Syllable layout": (layout_file, True, "The translator's document, one box per note"),
+    "2 · Score without lyrics": (blank_file, False, "The same engraving with the lyrics removed. Made from file 1 if not supplied"),
+    "3 · Syllable layout or lyrics sheet": (layout_file, True, "The translator's document: one box per note, or plain lines hyphenated at the syllables"),
     "4 · English syllable layout": (
         english_layout_file,
         False,
@@ -456,9 +478,10 @@ uploaded = {
 if not all(handle for handle, required, _ in uploaded.values() if required):
     st.markdown(
         f'<div class="smg-banner smg-banner--info">'
-        f'<strong>To begin, upload files 1 to 3 using the panel on the left.</strong> '
-        f'File 4 is required only when the English syllable layout is supplied as a '
-        f'separate document.</div>',
+        f'<strong>To begin, upload files 1 and 3 using the panel on the left.</strong> '
+        f'Files 2 and 4 are optional: file 2 is made from file 1 when it is not supplied, '
+        f'and file 4 is needed only when the English syllable layout is a separate '
+        f'document.</div>',
         unsafe_allow_html=True,
     )
     st.dataframe(
@@ -483,7 +506,7 @@ if not all(handle for handle, required, _ in uploaded.values() if required):
     st.stop()
 
 english_bytes = english_file.getvalue()
-blank_bytes = blank_file.getvalue()
+blank_bytes = blank_file.getvalue() if blank_file else b""
 layout_bytes = layout_file.getvalue()
 english_layout_bytes = english_layout_file.getvalue() if english_layout_file else b""
 reset_edits(digest(english_bytes, blank_bytes, layout_bytes, english_layout_bytes))
@@ -508,10 +531,28 @@ try:
 except Exception as error:  # noqa: BLE001
     stop_with_a_way_out("File 1, the English score, could not be read.", str(error))
 
+# File 3 is either a grid with one box per note, or an ordinary page of words
+# hyphenated at the syllables. Which one it is, is read off the document: a lyrics
+# sheet is the one written in section headings and running prose.
+lyrics_doc = lyrics_cached(layout_bytes)
 try:
     layout_doc = parse_layout_cached(layout_bytes)
-except Exception as error:  # noqa: BLE001
-    stop_with_a_way_out("File 3, the syllable layout, could not be read.", str(error))
+except Exception:  # noqa: BLE001
+    layout_doc = None
+lyrics_mode = lyrics_mod.prefer_lyrics_sheet(lyrics_doc, layout_doc, score_doc)
+if layout_doc is None and not lyrics_mode:
+    stop_with_a_way_out(
+        "File 3 could not be read.",
+        "It was read neither as a syllable layout nor as a lyrics sheet.",
+    )
+
+# The no-lyrics score is the copy the syllables are drawn onto. When one was not
+# supplied it is made here by deleting the lyric text from file 1, which leaves
+# the staves, notes and everything else exactly as engraved.
+derived_blank = False
+if not blank_bytes:
+    blank_bytes, _ = blank_from_score_cached(score_doc, english_bytes, digest(english_bytes))
+    derived_blank = True
 
 geometry_problems = geometry_cached(score_doc, blank_bytes, digest(english_bytes, blank_bytes))
 score_sections = [name for _, _, _, name in score_doc.sections]
@@ -527,11 +568,31 @@ score_words = score_doc.sung_words()
 # Some translators keep the English and the translation in one file, some in two.
 # Every English syllable is already printed in the score, so which rows are which
 # is read off the file rather than asked about.
-one_document = bool(
+one_document = not lyrics_mode and bool(
     layout_mod.split_by_language(layout_mod.to_editable(layout_doc), score_words)[0]
 )
 
-if one_document:
+if lyrics_mode:
+    # No grid to read: the English phrase lines are cut from the score's own lyrics
+    # and matched against the written lines of the sheet.
+    english_layout_doc = None
+    style_scores = {}
+    style = "All rows"
+    english_lines, lyrics_translation, lyrics_notes = from_lyrics_cached(
+        score_doc, lyrics_doc, digest(english_bytes, layout_bytes)
+    )
+    editable_lines = [
+        layout_mod.EditableLine(
+            id=line.id,
+            page=0,
+            section=line.section,
+            tag="",
+            tokens=list(line.tokens),
+            xs=[],
+        )
+        for line in lyrics_doc.lines
+    ]
+elif one_document:
     english_layout_doc = None
     style_scores = {}
     style = st.session_state.get("layout_style", "All rows")
@@ -569,11 +630,52 @@ working_lines = [
     line for line in editable_lines if line.id not in st.session_state["dropped_layout"]
 ]
 
-pair_result = pairing_mod.pair_layouts(english_lines, working_lines)
-pairs = pair_result.pairs
-translation = pairing_mod.translation_map(
-    pairs, working_lines, st.session_state["pair_overrides"], english_lines
-)
+if lyrics_mode:
+    # The English line and its syllables were matched when the sheet was read, so
+    # the correspondence is already known. It is turned into the same rows the
+    # grid path produces, and corrections made in Step 3 are laid over the top.
+    translation = {
+        line_id: list(tokens) for line_id, tokens in lyrics_translation.items()
+    }
+    for line_id, value in st.session_state["pair_overrides"].items():
+        translation[line_id] = (
+            [str(token) for token in value]
+            if isinstance(value, (list, tuple))
+            else str(value).split()
+        )
+    pairs = [
+        pairing_mod.Pair(
+            english_id=line.id,
+            translated_id=line.id if line.id in lyrics_translation else None,
+            english_text=line.text,
+            translated_text=" ".join(translation.get(line.id, [])),
+            section=line.section,
+            tag=line.tag,
+            english_count=line.note_count,
+            translated_count=len(translation.get(line.id, [])),
+            status=(
+                "ok"
+                if len(translation.get(line.id, [])) == line.note_count
+                else ("english-only" if not translation.get(line.id) else "count")
+            ),
+        )
+        for line in english_lines
+    ]
+    clean = sum(1 for pair in pairs if pair.status == "ok")
+    pair_result = pairing_mod.PairingResult(
+        pairs=pairs,
+        confidence=clean / max(1, len(pairs)),
+        # Only what the table above does not already say: a line whose counts
+        # disagree is listed there row by row, so repeating it here is noise.
+        notes=list(lyrics_doc.warnings)
+        + [note for note in lyrics_notes if note.startswith("These headings")],
+    )
+else:
+    pair_result = pairing_mod.pair_layouts(english_lines, working_lines)
+    pairs = pair_result.pairs
+    translation = pairing_mod.translation_map(
+        pairs, working_lines, st.session_state["pair_overrides"], english_lines
+    )
 
 ordered_sections: list[str] = []
 for line in english_lines:
@@ -752,14 +854,21 @@ if step == 1:
         st.markdown("**Detected in the layout**")
         st.metric("English lines", len(english_lines))
         st.metric("Translated lines", len(working_lines))
-        st.write(
-            "Both languages were found within file 3."
-            if one_document
-            else "English taken from file 4; translation from file 3."
-        )
+        if lyrics_mode:
+            st.write(
+                "File 3 was read as a lyrics sheet. The English was taken from the score "
+                "itself and cut into lines at its punctuation."
+            )
+        elif one_document:
+            st.write("Both languages were found within file 3.")
+        else:
+            st.write("English taken from file 4; translation from file 3.")
+        if derived_blank:
+            st.write("The no-lyrics score was made from file 1.")
 
     warnings = list(score_doc.warnings)
-    warnings += [f"Layout: {w}" for w in layout_doc.warnings]
+    if layout_doc is not None and not lyrics_mode:
+        warnings += [f"Layout: {w}" for w in layout_doc.warnings]
     if english_layout_doc is not None:
         warnings += [f"English layout: {w}" for w in english_layout_doc.warnings]
     if warnings:
@@ -786,10 +895,18 @@ if step == 2:
     )
 
     st.markdown("---")
-    st.markdown(
-        "**One box per note.** Remove the space between two syllables to set them on a single "
-        "note; add a space to separate them again. Clear **Use** to omit a line entirely."
-    )
+    if lyrics_mode:
+        st.markdown(
+            "**One syllable per note.** The lines below were split at the hyphens in the "
+            "document. Add a hyphen to split a word further; remove the space between two "
+            "syllables to sing them both on one note."
+        )
+    else:
+        st.markdown(
+            "**One box per note.** Remove the space between two syllables to set them on a "
+            "single note; add a space to separate them again. Clear **Use** to omit a line "
+            "entirely."
+        )
 
     frame = pd.DataFrame(
         [
@@ -849,7 +966,8 @@ if step == 2:
     if changed:
         st.info(f"{changed} line(s) edited. All later steps use the edited text.")
 
-    with st.expander("Advanced · Where the translation sits within the document", expanded=False):
+    if not lyrics_mode:
+      with st.expander("Advanced · Where the translation sits within the document", expanded=False):
         st.write(
             "The app has already chosen how to read the document. Change this only if the "
             "table above shows the wrong text."
@@ -876,7 +994,8 @@ if step == 2:
             horizontal=True,
         )
 
-    with st.expander("Advanced · The English layout as it was read", expanded=False):
+    if not lyrics_mode:
+      with st.expander("Advanced · The English layout as it was read", expanded=False):
         st.write("Change a line here only if the English was read from the document incorrectly.")
         english_frame = pd.DataFrame(
             [

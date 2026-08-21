@@ -127,10 +127,13 @@ def normalize_section(name: str) -> str:
     text = re.sub(r"[\.\-_]+", " ", text)
     # 'ch1' and 'v2' are written without a space; give the number one.
     text = re.sub(r"(?<=[a-z])(?=\d)", " ", text)
-    text = re.sub(r"\bpre\s*ch(orus|oro)?\b", "prechorus", text)
-    text = re.sub(r"\bch(orus|oro)?\b", "chorus", text)
-    text = re.sub(r"\bv(erse|s)?\b", "verse", text)
-    text = re.sub(r"\bpuente\b", "bridge", text)
+    text = re.sub(r"\bpre\s*(ch(orus|oro|oru)?|coro)\b", "prechorus", text)
+    text = re.sub(r"\b(ch(orus|oro|oru)?|coro|estribillo|refr(ain|ao|ão)|refrein)\b", "chorus", text)
+    # A verse is written 'Verse', 'Verso', 'Vers', 'Estrofa' or just its number,
+    # depending on the language the sheet was written in.
+    text = re.sub(r"\bv(erse|erso|ers|s)?\b", "verse", text)
+    text = re.sub(r"\b(estrofa|strofa|couplet)\b", "verse", text)
+    text = re.sub(r"\b(puente|ponte|brucke|brücke|pont)\b", "bridge", text)
     digits = re.findall(r"\d+", text)
     stem = re.sub(r"[^a-z]", "", text)
     return stem + (digits[-1] if digits else "")
