@@ -4,40 +4,55 @@ Takes a translated syllable layout and writes it under the notes of an engraved 
 
 ## The files
 
-| File | What it is | |
-| --- | --- | --- |
-| **1. English score** | The engraved score with the English lyrics under the notes | required |
-| **2. Same score, no lyrics** | The identical engraving with the lyrics removed — this is the canvas | made from file 1 if you do not have it |
-| **3. Syllable layout or lyrics sheet** | The translator's document, line by line | required |
-| **4. English syllable layout** | The same layout before it was translated | only if it is a separate file |
+Two.
 
-It returns the no-lyrics score with the translated syllables placed on the notes.
+| File | What it is |
+| --- | --- |
+| **1. English score** | The engraved score with the English lyrics under the notes |
+| **2. Syllable layout** | The English syllable layout followed by the translated one, in a single document |
 
-**The least you can supply is files 1 and 3.** Everything else is worked out from those two.
+It returns the score with the English lyrics removed and the translated syllables placed on the
+notes.
 
-**One file or two.** Some translators keep the English layout and the translated one in a single
-document — facing halves, or one under the other. Others keep them as two files. Either works,
-and you are not asked which: every English syllable is already printed in your score, so the app
-reads each row and knows whether it is English or the translation. Rows come out at around 100%
-against the score when they are English and under a third when they are not, so it is not a
-close call. Step 1 tells you which it found.
+**There is no third file to find.** The score without lyrics used to be a separate upload; it is
+now made from file 1. The English syllable layout used to be a separate upload; it belongs at the
+front of file 2. Both changes remove a way of getting the job wrong.
 
-Where the two languages sit in one document, the translator has already lined each translated
-line up with its English one, so the app does not have to work that out: pairing is exact rather
-than a sequence match.
+### Why file 2 should hold both languages
 
-### When file 2 is missing
+Every English syllable is already printed in your score, so the app reads each row of file 2 and
+knows by itself whether it is English or the translation — rows score around 100% against the
+score when they are English and under a third when they are not, so it is never a close call.
 
-The no-lyrics score is the canvas the syllables are drawn onto. If you were never sent one, the
-app makes it: it deletes the lyric text from file 1 and leaves everything else — staves, notes,
-slurs, dynamics, section labels — exactly as engraved. It knows which text to delete because it
-is the same text it already turned into syllable slots.
+Keeping both in one document matters because the translator has already lined each translated
+line up with its English one. The app does not have to work that correspondence out; it reads it.
+That is worth a great deal:
 
-Scored against the same hand-made Aymara score, the derived canvas gives **112 / 112 (100%)** —
-the same as being handed the engraver's own no-lyrics export. Use theirs when you have it; you
-lose nothing when you don't.
+| what file 2 holds | scored against the hand-made Aymara score |
+| --- | --- |
+| **English followed by translation** | **112 / 112 (100%)** |
+| translation only | 95 / 112 (85%) |
 
-### When file 3 is a plain lyrics sheet
+If you only have the two halves as separate PDFs, bind them into one — English pages first — and
+upload that. Any PDF tool will do it.
+
+### If file 2 holds only the translation
+
+It still runs. The English lines are cut from the score's own lyrics instead, and matched to the
+translator's lines by section, order and syllable count. Step 1 says plainly that this happened,
+because the result is measurably worse than a document holding both.
+
+### How the score without lyrics is made
+
+The canvas the syllables are drawn onto is produced from file 1: the app deletes the lyric text
+and leaves everything else — staves, notes, slurs, dynamics, section labels — exactly as
+engraved. It knows which text to delete because it is the same text it already turned into
+syllable slots.
+
+This is not an approximation. The surviving text of the derived file is identical to an
+engraver's own no-lyrics export, and the answer-key score is **112 / 112** either way.
+
+### If file 2 is a plain lyrics sheet
 
 Not every translator produces a grid with one box per note. Some send an ordinary page of words,
 hyphenated at the syllable breaks, under section headings:
@@ -70,7 +85,7 @@ person had already produced by hand for the same piece:
 
 | | Staff lines matching the human version |
 | --- | --- |
-| **All four files** | **112 / 112 (100%)** |
+| **Both files** | **112 / 112 (100%)** |
 
 Across nine voice parts, nine pages and 1,034 notes — including the places where a part enters
 mid-word, where two syllables share a note, and where the same English line has two different

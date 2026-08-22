@@ -3,6 +3,10 @@
 This exists because a previous version scored 100% when the alignment engine was
 driven directly from a test script, but 96% through the app itself: the app was
 not passing the reference timeline. Testing the library is not testing the app.
+
+The app now takes two files. File 2 is the English syllable layout followed by the
+translated one, which for this piece is the two separate layout PDFs bound into a
+single document (`fixtures_jwb143_combined_layout.pdf`).
 """
 
 import pathlib
@@ -13,9 +17,7 @@ import compare_pdf_to_key as compare
 U = "/root/.claude/uploads/b9bec0c9-1936-58a6-bb58-8c0df0b786d4/"
 FILES = {
     "english": U + "69deabc6-jwb143_DoNotLetYourHandsDropDown_Full_Score.pdf",
-    "blank": U + "702ac9c0-jwb143_DoNotLetYourHandsDropDown_No_LyricsFull_Score.pdf",
-    "layout": U + "1c671057-jwb143_SyllableLayoutaymara.pdf",
-    "english_layout": U + "b6fa29ed-jwb143_Do_Not_Let_Your_Hands_Drop_Down_SyllableLayout.pdf",
+    "layout": "fixtures_jwb143_combined_layout.pdf",
 }
 
 SHIM = """
@@ -35,22 +37,18 @@ _st.file_uploader = _fake_uploader
 """
 
 
-def run(with_english: bool):
+def run():
     from streamlit.testing.v1 import AppTest
 
-    files = dict(FILES)
-    if not with_english:
-        files.pop("english_layout")
     source = pathlib.Path("app.py").read_text()
     source = source.replace(
-        "import streamlit as st", "import streamlit as st\n" + SHIM.format(files=files), 1
+        "import streamlit as st", "import streamlit as st\n" + SHIM.format(files=FILES), 1
     )
-    target = f"_generated_{'four' if with_english else 'three'}_file_app.py"
+    target = "_generated_two_file_app.py"
     pathlib.Path(target).write_text(source)
 
-    label = "FOUR FILES (word matching)" if with_english else "THREE FILES (count fallback)"
     print("=" * 70)
-    print(label)
+    print("TWO FILES (score + combined layout)")
     at = AppTest.from_file(target, default_timeout=900)
     at.run()
     for exception in at.exception:
@@ -67,26 +65,25 @@ def run(with_english: bool):
         return None
 
     pdf = at.session_state["result_pdf"]
-    out = f"_app_output_{'four' if with_english else 'three'}.pdf"
+    out = "_app_output.pdf"
     pathlib.Path(out).write_bytes(pdf)
     return out
 
 
-for with_english in (True,):  # the English layout is now a mandatory upload; no fallback mode
-    produced = run(with_english)
-    if not produced:
-        sys.exit(1)
-    key = compare.read(compare.KEY, ["Arial"])
-    ours = compare.read(produced, ["LiberationSerif", "DejaVu"], geometry_from=compare.ENGLISH)
-    entries = sorted(set(list(key) + list(ours)))
-    good = sum(
-        1
-        for entry in entries
-        if compare.flat(ours.get(entry, "")) == compare.flat(key.get(entry, ""))
-    )
-    print(f"APP OUTPUT vs answer key: {good}/{len(entries)} staff lines  ({good / len(entries):.1%})")
-    for entry in entries:
-        if compare.flat(ours.get(entry, "")) != compare.flat(key.get(entry, "")):
-            print(f"   page {entry[0] + 1} staff {entry[1]}")
-            print(f"      app: {' '.join(ours.get(entry, '').split())[:120]}")
-            print(f"      key: {' '.join(key.get(entry, '').split())[:120]}")
+produced = run()
+if not produced:
+    sys.exit(1)
+key = compare.read(compare.KEY, ["Arial"])
+ours = compare.read(produced, ["LiberationSerif", "DejaVu"], geometry_from=compare.ENGLISH)
+entries = sorted(set(list(key) + list(ours)))
+good = sum(
+    1
+    for entry in entries
+    if compare.flat(ours.get(entry, "")) == compare.flat(key.get(entry, ""))
+)
+print(f"APP OUTPUT vs answer key: {good}/{len(entries)} staff lines  ({good / len(entries):.1%})")
+for entry in entries:
+    if compare.flat(ours.get(entry, "")) != compare.flat(key.get(entry, "")):
+        print(f"   page {entry[0] + 1} staff {entry[1]}")
+        print(f"      app: {' '.join(ours.get(entry, '').split())[:120]}")
+        print(f"      key: {' '.join(key.get(entry, '').split())[:120]}")

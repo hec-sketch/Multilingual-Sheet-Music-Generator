@@ -1,11 +1,9 @@
-"""Drive the real app on the By Faith files and report coverage per voice."""
+"""Drive the real app on By Faith: score + the two layout halves bound as one file."""
 import pathlib, sys
 U = "/root/.claude/uploads/b9bec0c9-1936-58a6-bb58-8c0df0b786d4/"
 FILES = {
     "english": U + "0fdce4c7-jwb141_By_Faith_Full_Score.pdf",
-    "blank": U + "47c6c538-jwb141_By_Faith_No_LyricsFull_Score.pdf",
-    "layout": U + "28f4624f-jwb141_By_Faith_SyllableLayout_1.pdf",
-    "english_layout": U + "aa67e894-jwb141_By_Faith_SyllableLayout.pdf",
+    "layout": "fixtures_byfaith_combined_layout.pdf",
 }
 SHIM = """
 import io as _io, streamlit as _st

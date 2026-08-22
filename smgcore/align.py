@@ -1,21 +1,19 @@
 """Work out which words each voice sings, and where each syllable goes.
 
-Two engines live here.
+Everything here is built on one idea: match the words, do not count them. Every
+syllable printed in the English score is compared against every syllable of the
+English layout, and the two are aligned end to end. Because the words themselves
+are being matched, the result is not a guess - the app knows that *this* note
+carries *that* layout syllable, so the translated syllable paired with it lands
+exactly there. Repeats, late entries, dropouts, canons and lines that wrap across
+systems and pages all fall out of the alignment for free.
 
-**Text alignment** (``align_voice_by_text``) is used when an English syllable
-layout has been supplied. Every syllable in the English score is compared against
-every syllable in the English layout, and the two are aligned end to end. Because
-the words themselves are being matched, the result is not a guess: the app knows
-that *this* note carries *that* layout syllable, so the translated syllable
-paired with it lands exactly there. Repeats, late entries, dropouts, canons and
-lines that wrap across systems and pages all fall out of the alignment for free.
+That needs English syllable lines to align against. They come either from the
+layout document itself, where it holds both languages, or from the score, cut
+into phrases by :mod:`smgcore.lyricsdoc`. Either way this module is given them
+and never has to fall back to counting.
 
-**Count alignment** (``align_voice``) is the fallback for when no English layout
-is available. It has nothing to compare words against, so it works from section
-labels, syllable counts and per-line tags. It is far more approximate, which is
-why supplying the English layout is worth the extra upload.
-
-Both produce the same ``VoicePlan``, and everything they decide stays editable.
+Everything it decides stays editable.
 """
 
 from __future__ import annotations
@@ -678,206 +676,4 @@ def align_all_by_text(score_doc, english_lines, translation, section_map, voices
         plans[voice] = align_voice_by_text(
             voice, lines, english_lines, translation, section_map, timeline
         )
-    return plans
-
-
-# --------------------------------------------------------------------------- count alignment
-
-
-def align_voice(voice, score_lines, layout_lines, section_map, allow_partial=True) -> VoicePlan:
-    """Fallback for when there is no English layout: choose lines by count and section."""
-    slots = [anchor for line in score_lines for anchor in line.anchors]
-    total = len(slots)
-    if total == 0:
-        return VoicePlan(voice, [], 0, 0, 0.0)
-
-    slot_sections = [a.section for a in slots]
-    counts = [line.note_count for line in layout_lines]
-    line_sections = [section_map.get(line.section, line.section) for line in layout_lines]
-    lead = _is_lead(voice)
-
-    def section_at(index: int) -> str:
-        if index >= total:
-            return slot_sections[-1] if slot_sections else ""
-        return slot_sections[index]
-
-    def use_cost(j: int, i: int) -> float:
-        cost = 0.0
-        here = section_at(i)
-        if line_sections[j] and here and line_sections[j] != here:
-            cost += 9.0
-        if not _tag_fits(layout_lines[j].tag, voice):
-            cost += 3.5
-        return cost
-
-    def skip_cost(j: int, i: int) -> float:
-        here = section_at(i)
-        if not _tag_fits(layout_lines[j].tag, voice):
-            return 0.05
-        if line_sections[j] and here and line_sections[j] != here:
-            return 0.1
-        return 1.1 if lead else 0.5
-
-    count = len(layout_lines)
-    dp = [[INFINITY] * (total + 1) for _ in range(count + 1)]
-    back: list[list[tuple | None]] = [[None] * (total + 1) for _ in range(count + 1)]
-    dp[0][0] = 0.0
-
-    for j in range(count):
-        row, nxt = dp[j], dp[j + 1]
-        for i in range(total + 1):
-            base = row[i]
-            if base == INFINITY:
-                continue
-            value = base + skip_cost(j, i)
-            if value < nxt[i]:
-                nxt[i] = value
-                back[j + 1][i] = (i, 0, 0)
-            length = counts[j]
-            end = i + length
-            if length and end <= total:
-                value = base + use_cost(j, i)
-                if value < nxt[end]:
-                    nxt[end] = value
-                    back[j + 1][end] = (i, length, 0)
-            if allow_partial and length > 1:
-                penalty = 6.0 + use_cost(j, i)
-                for take in range(1, length):
-                    end = i + take
-                    if end > total:
-                        break
-                    for offset in (0, length - take):
-                        value = base + penalty + (length - take) * 0.4
-                        if value < dp[j + 1][end]:
-                            dp[j + 1][end] = value
-                            back[j + 1][end] = (i, take, offset)
-
-    if dp[count][total] == INFINITY:
-        best_i = max((i for i in range(total + 1) if dp[count][i] < INFINITY), default=0)
-    else:
-        best_i = total
-
-    chosen: list[tuple] = []
-    i = best_i
-    for j in range(count, 0, -1):
-        step = back[j][i]
-        if step is None:
-            continue
-        previous, take, offset = step
-        if take:
-            chosen.append((j - 1, take, offset))
-        i = previous
-    chosen.reverse()
-
-    stream: list[str] = []
-    provenance: list[int] = []
-    partial_lines: set[int] = set()
-    for index, take, offset in chosen:
-        tokens = layout_lines[index].merged_tokens()
-        piece = tokens[offset : offset + take]
-        if take != len(tokens):
-            partial_lines.add(layout_lines[index].id)
-        stream.extend(piece)
-        provenance.extend([layout_lines[index].id] * len(piece))
-
-    assignments: list[Assignment] = []
-    cursor = 0
-    for line in score_lines:
-        need = line.note_count
-        tokens = stream[cursor : cursor + need]
-        ids = sorted(set(provenance[cursor : cursor + need]))
-        cursor += len(tokens)
-        if len(tokens) < need:
-            status = "unmatched" if not tokens else "partial"
-            tokens = tokens + [""] * (need - len(tokens))
-            note = "No layout syllables were left for this line."
-        elif any(i in partial_lines for i in ids):
-            status = "partial"
-            note = "Only part of a layout line was used here."
-        else:
-            status = "ok"
-            note = ""
-        assignments.append(
-            Assignment(
-                score_line_id=line.id,
-                voice=voice,
-                page=line.page,
-                section=line.section,
-                english=line.text,
-                tokens=tokens,
-                layout_line_ids=ids,
-                status=status,
-                note=note,
-            )
-        )
-
-    matched = sum(1 for a in assignments if a.status == "ok")
-    filled = sum(1 for a in assignments for t in a.tokens if t)
-    return VoicePlan(
-        voice=voice,
-        assignments=assignments,
-        matched=matched,
-        total=len(assignments),
-        cost=dp[count][best_i],
-        covered=filled,
-        notes_total=total,
-    )
-
-
-def choose_style(layout_doc, score_doc, styles: list[str], english_lines=None) -> tuple[str, dict]:
-    """Work out where the text lives in a layout by trying each reading and testing it.
-
-    A layout may be plain text, or text with the useful part added as comments.
-    Guessing from the proportion of comments is unreliable, so we test instead.
-    When an English layout is available the test is a word-for-word one; otherwise
-    it falls back to seeing which reading lets the busiest voice match cleanly.
-    """
-    from .layout import to_editable
-
-    grouped = score_doc.lines_by_voice()
-    if not grouped:
-        return styles[0], {}
-    probe = max(grouped, key=lambda v: sum(line.note_count for line in grouped[v]))
-    probe_lines = grouped[probe]
-    score_sections = [name for _, _, _, name in score_doc.sections]
-
-    scores: dict[str, float] = {}
-    for style in styles:
-        lines = to_editable(layout_doc, style)
-        if not lines:
-            scores[style] = -1.0
-            continue
-        sections: list[str] = []
-        for line in lines:
-            if line.section and line.section not in sections:
-                sections.append(line.section)
-        mapping = build_section_map(sections, score_sections)
-        if english_lines is None:
-            # Reading being tested is itself the text we match against the score.
-            found = map_voice_to_layout(probe, probe_lines, lines, mapping)
-            scores[style] = sum(1 for entry in found if entry) / max(1, len(found))
-        else:
-            plan = align_voice(probe, probe_lines, lines, mapping, allow_partial=False)
-            scores[style] = sum(1 for a in plan.assignments if a.status == "ok") / max(
-                1, plan.total
-            )
-
-    best = max(scores, key=lambda s: scores[s])
-    return best, scores
-
-
-def align_all(score_doc, layout_doc, section_map=None, voices=None) -> dict[str, VoicePlan]:
-    layout_lines = layout_doc.lyric_lines()
-    score_sections = [name for _, _, _, name in score_doc.sections]
-    if section_map is None:
-        section_map = build_section_map(layout_doc.sections, score_sections)
-
-    grouped = score_doc.lines_by_voice()
-    targets = voices if voices is not None else score_doc.voices
-    plans: dict[str, VoicePlan] = {}
-    for voice in targets:
-        lines = grouped.get(voice, [])
-        if not lines:
-            continue
-        plans[voice] = align_voice(voice, lines, layout_lines, section_map)
     return plans

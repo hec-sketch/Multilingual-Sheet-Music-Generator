@@ -673,8 +673,8 @@ def parse_score(pdf_bytes: bytes) -> ScoreDoc:
 
     if not anchors:
         raise ValueError(
-            "No lyrics were found under the staves. If this is the no-lyrics score, upload it in "
-            "the second slot instead."
+            "No lyrics were found under the staves. File 1 must be the engraving that still has "
+            "the English lyrics set under the notes."
         )
 
     sections = find_sections(doc, staves_by_page)

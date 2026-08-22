@@ -139,6 +139,24 @@ def parse_lyrics_document(data: bytes) -> LyricsDoc:
 INNER_HYPHEN = re.compile(r"\w[-‐‑‒–]\w")
 
 
+def lyrics_doc_from_lines(lines) -> LyricsDoc:
+    """Treat already-parsed layout rows as the written lines of a sheet.
+
+    Used when file 2 holds a grid of the translation but no English to match it
+    against. The rows are one-per-note and therefore better than prose, but where
+    each row belongs still has to be worked out from the score, which is exactly
+    what the lyrics-sheet pairing does.
+    """
+    return LyricsDoc(
+        lines=[
+            ProseLine(id=line.id, section=line.section, text=line.text, tokens=list(line.tokens))
+            for line in lines
+        ],
+        sections=list(dict.fromkeys(line.section for line in lines if line.section)),
+        warnings=[],
+    )
+
+
 def prefer_lyrics_sheet(lyrics: LyricsDoc, layout_doc, score_doc) -> bool:
     """Whether file 3 is a plain lyrics sheet rather than a box-grid layout.
 
