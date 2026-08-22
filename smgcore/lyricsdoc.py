@@ -26,24 +26,51 @@ hand before anything is drawn.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 
 from .align import normalize_section
-from .layout import EditableLine
+from .layout import ENGLISH_ROW, EditableLine
 from .textutil import fold
 
 # --------------------------------------------------------------------------- reading
 
 # Section headings, in the languages these documents are usually written in. A
-# heading is a short line that is nothing but one of these words and a number.
+# heading is a short line that is nothing but one of these words and a number -
+# including the bare abbreviations ('Ch', 'Br') a translator's own worksheet
+# often uses in place of the score's full names ('Chorus', 'Bridge').
 SECTION_WORD = (
-    r"(?:chorus|choru|chor|coro|estribillo|refrain|refr[aã]o|refrein|kor|"
+    r"(?:chorus|choru|chor|ch|coro|estribillo|refrain|refr[aã]o|refrein|kor|"
     r"verse|verso|vers|estrofa|strofa|couplet|"
     r"pre[\s\-]*chorus|pre[\s\-]*ch|pre[\s\-]*coro|prechorus|"
-    r"bridge|puente|ponte|br[uü]cke|pont|"
+    r"bridge|br|puente|ponte|br[uü]cke|pont|"
     r"intro|outro|ending|final|tag|coda|interlude|instrumental)"
 )
-HEADING = re.compile(rf"^\s*{SECTION_WORD}\s*\.?\s*(\d+)?\s*[:.]?\s*$", re.I)
+# Not \b: a number may follow the section word with no space ('Ch1'), and \b
+# does not separate two word characters, which a letter and a digit both are.
+HEADING_START = re.compile(rf"^\s*{SECTION_WORD}(?![^\W\d_])", re.I)
+# What may follow the section word on a heading row: numbers, commas between
+# them, and a trailing note in parentheses - 'Ch2, 3' or 'Ch2, 3 (only in ch2)'.
+HEADING_TAIL = re.compile(r"^[\s,]*(?:\d+[\s,]*)*[:.]?\s*(?:\([^)]*\))?\s*$")
+
+
+def heading_labels(row: str) -> list[str] | None:
+    """The section name(s) a heading row stands for, or None if it is not one.
+
+    A row naming more than one number - 'Ch2, 3' - is the same written block
+    sung at two places in the score, so it stands for both section names, not
+    one heading with a stray extra number.
+    """
+    match = HEADING_START.match(row)
+    tail = row[match.end():] if match else ""
+    if not match or not HEADING_TAIL.match(tail):
+        return None
+    word = match.group(0).strip()
+    # A parenthesised remark ('(only in ch2)') may itself contain a number; only
+    # the numbers naming the heading, before any such remark, are wanted.
+    numbers = re.findall(r"\d+", tail.split("(", 1)[0])
+    return [f"{word}{n}" for n in numbers] if numbers else [word]
+
 
 # Split a word into syllables at any kind of hyphen the document might use.
 HYPHENS = re.compile(r"[-‐‑‒–—−]")
@@ -85,43 +112,135 @@ def syllables_of(line: str) -> list[str]:
     return out
 
 
-def _text_lines(data: bytes) -> list[str]:
-    """Every non-empty line of the document, whether it is a PDF or plain text."""
-    if data[:5] == b"%PDF-":
-        import pymupdf
+NUMERAL_ROW = re.compile(r"^\d+$")
 
-        doc = pymupdf.open(stream=data, filetype="pdf")
-        raw = "\n".join(page.get_text() for page in doc)
-    else:
+
+def _visual_rows(page) -> list[tuple[float, str]]:
+    """One page's text, grouped by printed row rather than by however many text
+    runs the page happens to store.
+
+    Some documents place every word as its own positioned run - fully justified
+    text with no shared run to hold them together - which makes a naive read of
+    the page's text lines return one word per line. Clustering by y instead of
+    trusting the document's own line breaks reconstructs the row a human reads,
+    whether it was stored as one run or forty. Returns (y, text) so a caller can
+    tell a running header, pinned to the same slot on every page, from a chorus
+    that legitimately repeats wherever it falls in that page's own flow.
+    """
+    pieces: list[tuple[float, float, str]] = []
+    for block in page.get_text("dict")["blocks"]:
+        if block.get("type", 0) != 0:
+            continue
+        for line in block.get("lines", []):
+            text = "".join(span["text"] for span in line["spans"]).strip()
+            if text:
+                pieces.append((line["bbox"][1], line["bbox"][0], text))
+    pieces.sort(key=lambda p: (p[0], p[1]))
+
+    rows: list[list[tuple[float, str]]] = []
+    row_ys: list[float] = []
+    for y0, x0, text in pieces:
+        if rows and abs(row_ys[-1] - y0) <= 1.0:
+            rows[-1].append((x0, text))
+        else:
+            rows.append([(x0, text)])
+            row_ys.append(y0)
+    out = []
+    for y, row in zip(row_ys, rows):
+        joined = re.sub(r"\s+", " ", " ".join(t for _, t in sorted(row))).strip()
+        if joined:
+            out.append((y, joined))
+    return out
+
+
+def _page_rows(data: bytes) -> list[list[str]]:
+    """Every printed row of the document, one list per page, whether it is a PDF
+    or plain text (as a single page).
+
+    A row repeated at the same height on every page - a running title, a job
+    code pinned to the header slot - is front matter rather than lyrics, and is
+    dropped. A chorus that is simply sung more than once is not: it repeats at
+    whatever height it happens to fall on each page, not the same one every
+    time, so it survives this test even though its text repeats too. A row that
+    is nothing but a number is also dropped - a cue or measure reference some
+    translator worksheets print beside each block, not a syllable to place.
+    """
+    if data[:5] != b"%PDF-":
         raw = data.decode("utf-8", errors="replace")
-    return [line.strip() for line in raw.splitlines() if line.strip()]
+        return [[line.strip() for line in raw.splitlines() if line.strip()]]
+
+    import pymupdf
+
+    doc = pymupdf.open(stream=data, filetype="pdf")
+    per_page = [_visual_rows(page) for page in doc]
+
+    counts: Counter = Counter()
+    for rows in per_page:
+        for y, text in set(rows):
+            counts[(round(y), text)] += 1
+    n_pages = len(doc)
+    repeated = {key for key, n in counts.items() if n_pages > 1 and n >= max(2, n_pages - 1)}
+
+    out: list[list[str]] = []
+    for rows in per_page:
+        page_out = [
+            text
+            for y, text in rows
+            if (round(y), text) not in repeated and not NUMERAL_ROW.match(text)
+        ]
+        out.append(page_out)
+    return out
 
 
-def parse_lyrics_document(data: bytes) -> LyricsDoc:
-    """Read a plain lyrics sheet into sections of syllable lines."""
-    rows = _text_lines(data)
+def _parse_rows(rows: list[str]) -> LyricsDoc:
+    """Read one language's worth of printed rows into sections of syllable lines.
+
+    The first section is not always headed - a sheet often opens straight into
+    Verse 1 and only labels the sections after it - so collecting starts at the
+    first row that looks like a lyric (it has more than one syllable hyphen) if
+    that comes before any heading does. A heading naming more than one number
+    ('Ch2, 3') is registered under every number it names, since that is one
+    written block sung at two places in the score rather than one heading with a
+    stray number (see ``heading_labels``).
+    """
     lines: list[ProseLine] = []
     sections: list[str] = []
     warnings: list[str] = []
-    current = ""
-    seen_heading = False
+    current: list[str] = [""]
+    seen_content = False
     next_id = 0
+    pending = ""
+
+    def flush() -> None:
+        nonlocal pending, next_id
+        text = pending.strip()
+        pending = ""
+        tokens = syllables_of(text)
+        if not tokens:
+            return
+        for label in current:
+            lines.append(ProseLine(next_id, label, text, list(tokens)))
+            next_id += 1
 
     for row in rows:
-        if HEADING.match(row):
-            current = row.rstrip(":. ").strip()
-            seen_heading = True
-            if current not in sections:
-                sections.append(current)
+        labels = heading_labels(row)
+        if labels is not None:
+            flush()
+            current = labels
+            seen_content = True
+            for label in labels:
+                if label not in sections:
+                    sections.append(label)
             continue
-        if not seen_heading:
-            # Anything before the first heading is the title block, not lyrics.
+        if not seen_content and len(HYPHENS.findall(row)) < 2:
+            # A stray hyphen (a title, a compound word) does not make this a lyric
+            # line - a written line breaks several words at their syllables, so it
+            # takes more than one hyphen to tell the front matter from the lyrics.
             continue
-        tokens = syllables_of(row)
-        if not tokens:
-            continue
-        lines.append(ProseLine(next_id, current, row, tokens))
-        next_id += 1
+        seen_content = True
+        flush()
+        pending = row
+    flush()
 
     if not lines:
         warnings.append(
@@ -134,6 +253,65 @@ def parse_lyrics_document(data: bytes) -> LyricsDoc:
             "hyphens, so without them every word will be treated as a single note."
         )
     return LyricsDoc(lines=lines, sections=sections, warnings=warnings)
+
+
+def parse_lyrics_document(data: bytes, english_vocabulary=None) -> LyricsDoc:
+    """Read a plain lyrics sheet, keeping only the translation if it holds both.
+
+    Some translators send their English source pages and their finished
+    translation as one file, one after the other, each headed with its own copy
+    of the same section names. Splitting has to happen before the section
+    headings are read, not after: read straight through, a heading from the
+    English half would otherwise stay in force into the translated half that
+    follows it, mislabelling everything up to its own first heading. Each page
+    is classified by whether most of its words are already sung in the score
+    (the same test ``layout.split_by_language`` uses for a two-language grid),
+    and only runs of pages that are NOT English are parsed - each on its own, so
+    a heading never leaks from one language into the other.
+
+    With no vocabulary to check against, or where no real split is found, the
+    document is parsed as a single language, exactly as ``_parse_rows`` does.
+    """
+    pages = _page_rows(data)
+    whole = [row for page in pages for row in page]
+    if not english_vocabulary or len(pages) < 2:
+        return _parse_rows(whole)
+
+    labels: list[str] = []
+    last = "other"
+    for page in pages:
+        words = [fold(w).strip("-") for row in page for w in syllables_of(row)]
+        words = [w for w in words if w]
+        if words:
+            share = sum(1 for w in words if w in english_vocabulary) / len(words)
+            last = "english" if share >= ENGLISH_ROW else "other"
+        labels.append(last)
+
+    if len(set(labels)) < 2:
+        return _parse_rows(whole)
+
+    segments: list[tuple[str, list[str]]] = []
+    for label, page in zip(labels, pages):
+        if segments and segments[-1][0] == label:
+            segments[-1][1].extend(page)
+        else:
+            segments.append((label, list(page)))
+
+    lines: list[ProseLine] = []
+    sections: list[str] = []
+    warnings: list[str] = []
+    next_id = 0
+    for label, rows in segments:
+        if label != "other":
+            continue
+        doc = _parse_rows(rows)
+        for line in doc.lines:
+            lines.append(ProseLine(next_id, line.section, line.text, line.tokens))
+            next_id += 1
+        sections.extend(name for name in doc.sections if name not in sections)
+        warnings.extend(doc.warnings)
+
+    return LyricsDoc(lines=lines, sections=sections, warnings=warnings) if lines else _parse_rows(whole)
 
 
 INNER_HYPHEN = re.compile(r"\w[-‐‑‒–]\w")
@@ -155,6 +333,41 @@ def lyrics_doc_from_lines(lines) -> LyricsDoc:
         sections=list(dict.fromkeys(line.section for line in lines if line.section)),
         warnings=[],
     )
+
+
+def strip_english_lines(lyrics: LyricsDoc, english_vocabulary) -> LyricsDoc:
+    """Drop any lines that are themselves English, when the sheet holds both.
+
+    Some translators send their English source pages and their finished
+    translation as one file, one after the other, each under its own copy of the
+    same section headings. Every word of the English half is already printed in
+    the score, so a line is English when most of its words are - the same test
+    ``layout.split_by_language`` uses to tell the two halves of a two-language
+    grid apart. Only the translated half is kept; the English score already
+    supplies the English side of the pairing.
+
+    Returns ``lyrics`` unchanged if the document turns out to be only one
+    language - nothing would be left otherwise.
+    """
+    if not english_vocabulary:
+        return lyrics
+    kept: list[ProseLine] = []
+    dropped = 0
+    for line in lyrics.lines:
+        words = [fold(token).strip("-") for token in line.tokens]
+        words = [word for word in words if word]
+        if not words:
+            kept.append(line)
+            continue
+        share = sum(1 for word in words if word in english_vocabulary) / len(words)
+        if share >= ENGLISH_ROW:
+            dropped += 1
+        else:
+            kept.append(line)
+    if not dropped or not kept:
+        return lyrics
+    sections = list(dict.fromkeys(line.section for line in kept if line.section))
+    return LyricsDoc(lines=kept, sections=sections, warnings=list(lyrics.warnings))
 
 
 def prefer_lyrics_sheet(lyrics: LyricsDoc, layout_doc, score_doc) -> bool:
@@ -246,6 +459,11 @@ SPLIT_PENALTY = 1.0   # cutting one sung phrase across two written lines
 MERGE_PENALTY = 1.0   # running two sung phrases into one written line
 DROP_PROSE = 4.0      # a written line with no phrase to sing it
 DROP_PHRASE = 4.0     # a sung phrase with no written line, before the block runs out
+MAX_MERGE = 5         # a translation often writes one long sentence for a whole
+                       # run of short sung phrases (verse/pre-chorus repeats cut
+                       # into many score phrases); allow folding up to this many
+                       # consecutive phrases into a single written line, each
+                       # extra phrase paying one more MERGE_PENALTY
 
 
 def _align_block(phrases: list[list[str]], prose: list[ProseLine]):
@@ -283,11 +501,17 @@ def _align_block(phrases: list[list[str]], prose: list[ProseLine]):
                 options.append(
                     (abs(size(i) - pair) + SPLIT_PENALTY + best[i + 1][j + 2], ("split", i, j))
                 )
-            if i + 1 < rows and j < cols:
-                run = size(i) + size(i + 1)
-                options.append(
-                    (abs(run - prose[j].count) + MERGE_PENALTY + best[i + 2][j + 1], ("merge", i, j))
-                )
+            if j < cols:
+                for k in range(2, MAX_MERGE + 1):
+                    if i + k > rows:
+                        break
+                    run = sum(size(i + n) for n in range(k))
+                    options.append(
+                        (
+                            abs(run - prose[j].count) + (k - 1) * MERGE_PENALTY + best[i + k][j + 1],
+                            ("merge", i, j, k),
+                        )
+                    )
             if i < rows:
                 # Free once the written block is spent: the rest are repeats.
                 cost = 0.0 if j == cols else DROP_PHRASE
@@ -313,8 +537,12 @@ def _align_block(phrases: list[list[str]], prose: list[ProseLine]):
             out.append((phrases[i][first:], prose[j + 1]))
             i, j = i + 1, j + 2
         elif kind == "merge":
-            out.append((phrases[i] + phrases[i + 1], prose[j]))
-            i, j = i + 2, j + 1
+            k = step[3]
+            merged: list[str] = []
+            for n in range(k):
+                merged.extend(phrases[i + n])
+            out.append((merged, prose[j]))
+            i, j = i + k, j + 1
         elif kind == "phrase":
             out.append((phrases[i], None))
             i += 1
@@ -524,9 +752,15 @@ def build_from_lyrics(score_doc, lyrics: LyricsDoc):
     used_sections: set[str] = set()
     next_id = 0
 
-    for section, block in blocks:
+    for index, (section, block) in enumerate(blocks):
         key = normalize_section(section)
         prose = by_section.get(key, [])
+        if not prose and index == 0:
+            # A sheet often opens straight into its first section without
+            # labelling it - the first heading printed is really the second
+            # section's. Content collected before any heading was kept under ""
+            # and belongs here, since this is the section the score starts on.
+            prose = by_section.get("", [])
         if prose:
             used_sections.add(key)
         for tokens, line in _align_block(block, prose):

@@ -234,8 +234,8 @@ def blank_from_score_cached(_score_doc, score_bytes: bytes, key: str):
 
 
 @st.cache_data(show_spinner="Reading the lyrics sheet...", max_entries=4)
-def lyrics_cached(data: bytes):
-    return lyrics_mod.parse_lyrics_document(data)
+def lyrics_cached(data: bytes, vocabulary: frozenset):
+    return lyrics_mod.parse_lyrics_document(data, vocabulary)
 
 
 @st.cache_data(show_spinner="Matching the lyrics to the score...", max_entries=4)
@@ -510,7 +510,8 @@ except Exception as error:  # noqa: BLE001
 # File 2 is either a grid with one box per note, or an ordinary page of words
 # hyphenated at the syllables. Which one it is, is read off the document: a lyrics
 # sheet is the one written in section headings and running prose.
-lyrics_doc = lyrics_cached(layout_bytes)
+lyrics_doc = lyrics_cached(layout_bytes, frozenset(score_doc.sung_words()))
+lyrics_doc = lyrics_mod.strip_english_lines(lyrics_doc, score_doc.sung_words())
 try:
     layout_doc = parse_layout_cached(layout_bytes)
 except Exception:  # noqa: BLE001

@@ -76,6 +76,28 @@ Where a written line and its sung phrase disagree on how many syllables there ar
 word the translator left un-hyphenated — the line is matched anyway and listed in Step 3 for you
 to correct. Nothing is invented to make the counts agree.
 
+### Headings the translator abbreviates, and lines that run several phrases together
+
+Two things that used to trip the sheet-reading path up, fixed against a harder real piece
+("We Go Preaching"):
+
+- **Short headings.** A heading does not have to be spelled out. `Ch1`, `Br`, `Pre-Ch`, and one
+  heading naming more than one section at once (`Ch2, 3`, meaning the paragraph under it is sung
+  for both Chorus 2 and Chorus 3) are all read correctly now, whether the heading sits on its own
+  line in a lyrics sheet or in the margin next to a grid.
+- **One written sentence for several sung phrases.** A translator's sentence is often longer than
+  any one of the score's own phrase-cuts — the score might sing the same handful of words three or
+  four short times before the sentence resolves. The matching engine could only ever fold two sung
+  phrases into one written line; it now folds up to five, so a long translated sentence is
+  recognised as covering the whole run of short phrases it belongs to, instead of the extra
+  phrases being reported as having no line at all.
+
+A two-file lyrics-sheet upload of that same piece — English and Wayuunaiki prose in one PDF, mixed
+abbreviated and spelled-out headings — went from filling around half its notes to about
+four-fifths, with no errors at any step. The remainder is the honestly hard part: the written
+sentences are shorter overall than the sung phrases need line-for-line, which is a translation
+choice, not a bug, and is exactly what Step 3's line-by-line count check is there to surface.
+
 ---
 
 ### Checked against a hand-made score

@@ -28,10 +28,21 @@ from .textutil import DASHES, fold, normalize_spacing
 
 # Words a translator writes in the margin to label a musical section.
 SECTION_LABEL = re.compile(
-    r"^(?:(?:pre[\s\-]*)?(?:ch|chorus|coro)|v|verse|vs|bridge|puente|intro|outro|tag|end)\s*\d*$",
+    r"^(?:(?:pre[\s\-]*)?(?:ch|chorus|coro)|v|verse|vs|bridge|br|puente|ponte|intro|outro|tag|end)\s*\d*$",
     re.I,
 )
 BARE_NUMBER = re.compile(r"^\d+$")
+
+# A translator sometimes prints a section heading on a line of its own (no sung
+# text beside it) rather than as a margin label next to the lyric row - this looks
+# exactly like a lyrics-sheet heading. Recognise it so the section carries forward
+# correctly instead of the whole row being read as a one-word lyric line, and
+# support the "Ch2, 3" style of one heading naming more than one section.
+_HEADING_ROW = re.compile(
+    r"^(?:(?:pre[\s\-]*)?(?:ch|chorus|coro)|v|verse|vs|bridge|br|puente|ponte|"
+    r"intro|outro|tag|end|ending|coda)[\s,]*(?:\d+[\s,]*)*[:.]?\s*(?:\([^)]*\))?\s*$",
+    re.I,
+)
 
 # Tags that qualify a line rather than being sung.
 LINE_TAGS = re.compile(
@@ -536,6 +547,17 @@ def parse_layout(pdf_bytes: bytes) -> LayoutDoc:
                     sections_seen.append(label_text)
             elif label_text:
                 body_words = row  # not a recognised label - treat as content
+            elif not label_words:
+                row_text = normalize_spacing(" ".join(w[3] for w in row))
+                if _HEADING_ROW.match(row_text):
+                    word_match = re.match(r"[a-zA-Z]+", row_text)
+                    numbers = re.findall(r"\d+", row_text.split("(", 1)[0])
+                    word = word_match.group(0) if word_match else row_text.strip()
+                    label = f"{word}{numbers[0]}" if numbers else word
+                    current_section = label
+                    if label not in sections_seen:
+                        sections_seen.append(label)
+                    continue
 
             if not body_words:
                 continue

@@ -131,7 +131,7 @@ def normalize_section(name: str) -> str:
     # depending on the language the sheet was written in.
     text = re.sub(r"\bv(erse|erso|ers|s)?\b", "verse", text)
     text = re.sub(r"\b(estrofa|strofa|couplet)\b", "verse", text)
-    text = re.sub(r"\b(puente|ponte|brucke|brücke|pont)\b", "bridge", text)
+    text = re.sub(r"\b(bridge|br|puente|ponte|brucke|brücke|pont)\b", "bridge", text)
     digits = re.findall(r"\d+", text)
     stem = re.sub(r"[^a-z]", "", text)
     return stem + (digits[-1] if digits else "")
