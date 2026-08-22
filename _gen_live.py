@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 
 import pandas as pd
 import streamlit as st
@@ -256,7 +257,7 @@ def from_lyrics_cached(_score_doc, _lyrics_doc, key: str):
 
 
 @st.cache_data(show_spinner="Setting the syllables...", max_entries=3)
-def render_cached(_score_doc, blank: bytes, _placements, _held, size, offset, font, key):
+def render_cached(_score_doc, blank: bytes, _placements, _held, _nudges, size, offset, font, key):
     """Draw the score. Cached on the type settings so a slider change re-renders once.
 
     Only the settings and the file identity vary between calls, so moving a slider
@@ -265,7 +266,7 @@ def render_cached(_score_doc, blank: bytes, _placements, _held, size, offset, fo
     settings = render_mod.RenderSettings(
         max_size=size, baseline_offset=offset, font_choice=font
     )
-    return render_mod.render(_score_doc, blank, _placements, settings, _held)
+    return render_mod.render(_score_doc, blank, _placements, settings, _held, _nudges)
 
 
 def digest(*chunks: bytes) -> str:
@@ -339,6 +340,7 @@ def seed_state() -> None:
         ("english_edits", {}),
         ("pair_overrides", {}),
         ("assign_edits", {}),
+        ("nudge_edits", {}),
         ("skip_voices", []),
         ("dropped_layout", set()),
         ("upload_round", 0),
@@ -706,6 +708,23 @@ def edited_tokens(voice_name: str, assignment) -> list[str]:
     """The syllables for one score line, including anything typed over them."""
     override = st.session_state["assign_edits"].get(f"{voice_name}||{assignment.score_line_id}")
     return override.split() if override is not None else list(assignment.tokens)
+
+
+def edited_nudges(voice_name: str, assignment, count: int) -> list[float]:
+    """Hand-entered horizontal offsets (points) for one score line, one per note.
+
+    Defaults to no offset. A value that doesn't parse as a number is treated as 0
+    rather than raising, since this is free-typed text.
+    """
+    text = st.session_state["nudge_edits"].get(f"{voice_name}||{assignment.score_line_id}", "")
+    values: list[float] = []
+    for piece in text.split():
+        try:
+            values.append(float(piece))
+        except ValueError:
+            values.append(0.0)
+    values = values[:count] + [0.0] * (count - len(values))
+    return values
 
 
 # --------------------------------------------------------------------------- what needs doing
@@ -1293,6 +1312,7 @@ if step == 4:
                 "English in the score": assignment.english,
                 "Notes": len(assignment.tokens),
                 "Syllables": text,
+                "Nudge (pt)": st.session_state["nudge_edits"].get(key, ""),
                 "On held notes": assignment.held_text,
                 "Sung by": len(
                     set().union(*(voices_by_layout_line.get(repeat_origin.get(i, i), set())
@@ -1315,6 +1335,12 @@ if step == 4:
                 width="small", disabled=True, help="Notes on this line of the score"
             ),
             "Syllables": st.column_config.TextColumn(width="large", disabled=not solo),
+            "Nudge (pt)": st.column_config.TextColumn(
+                width="medium",
+                help="Fine-tune a syllable's position if the automatic placement looks off. "
+                "One number per note, space-separated (e.g. '-2 0 1.5') — negative moves left, "
+                "positive moves right. Leave blank to keep the automatic placement.",
+            ),
             "On held notes": st.column_config.TextColumn(
                 width="medium",
                 disabled=True,
@@ -1337,6 +1363,11 @@ if step == 4:
     else:
         for assignment in plan.assignments:
             st.session_state["assign_edits"].pop(f"{voice}||{assignment.score_line_id}", None)
+    for _, row in edited_voice.iterrows():
+        if str(row["Nudge (pt)"]).strip():
+            st.session_state["nudge_edits"][row["_key"]] = row["Nudge (pt)"]
+        else:
+            st.session_state["nudge_edits"].pop(row["_key"], None)
 
     unresolved = [a.note for a in plan.assignments if a.note]
     if unresolved:
@@ -1354,11 +1385,15 @@ if step == 5:
 
     placements: dict[int, list[str]] = {}
     held_notes: dict[int, list[tuple]] = {}
+    nudges: dict[int, list[float]] = {}
     issues: list[dict] = []
     for voice_name, voice_plan in plans.items():
         for assignment in voice_plan.assignments:
             tokens = edited_tokens(voice_name, assignment)
             need = len(assignment.tokens)
+            line_nudges = edited_nudges(voice_name, assignment, need)
+            if any(line_nudges):
+                nudges[assignment.score_line_id] = line_nudges
             if len(tokens) > need:
                 issues.append(
                     {
@@ -1423,10 +1458,17 @@ if step == 5:
                 blank_bytes,
                 placements,
                 held_notes,
+                nudges,
                 max_size,
                 baseline,
                 font_choice,
-                digest(english_bytes, layout_bytes),
+                digest(
+                    english_bytes,
+                    layout_bytes,
+                    json.dumps(placements, sort_keys=True).encode(),
+                    json.dumps(held_notes, sort_keys=True).encode(),
+                    json.dumps(nudges, sort_keys=True).encode(),
+                ),
             )
         except Exception as error:  # noqa: BLE001
             st.markdown(

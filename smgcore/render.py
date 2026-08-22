@@ -88,13 +88,18 @@ def _bounds(anchors, index, staff_x0, staff_x1):
     return left, right
 
 
-def render(score_doc, blank_bytes: bytes, placements, settings: RenderSettings, held=None) -> bytes:
+def render(
+    score_doc, blank_bytes: bytes, placements, settings: RenderSettings, held=None, nudges=None
+) -> bytes:
     """Draw the syllables onto the blank score.
 
     ``placements`` maps score-line id -> one syllable per printed English syllable.
     ``held`` maps score-line id -> [(x of a note, syllable)] for syllables that go
     on notes the English holds a vowel across, which have no English syllable of
     their own to sit under.
+    ``nudges`` maps score-line id -> one horizontal offset in points per printed
+    English syllable, for hand-adjusting a placement the automatic centring gets
+    wrong. A positive value moves a syllable right, negative moves it left.
     """
     doc = fitz.open(stream=blank_bytes, filetype="pdf")
     font_path = resolve_font_path(settings.font_choice)
@@ -104,7 +109,12 @@ def render(score_doc, blank_bytes: bytes, placements, settings: RenderSettings, 
 
     staff_span = {(s.page, s.index): (s.x0, s.x1) for s in score_doc.staves}
     held = held or {}
+    nudges = nudges or {}
     drawn = 0
+
+    def nudge(line_id, index):
+        shifts = nudges.get(line_id)
+        return shifts[index] if shifts and index < len(shifts) else 0.0
 
     def put(page_number, centre, baseline, text, left, right, hard_left=None, hard_right=None):
         # `left`/`right` is the room shared with the neighbouring syllables - used
@@ -149,7 +159,8 @@ def render(score_doc, blank_bytes: bytes, placements, settings: RenderSettings, 
                 if not text:
                     continue
                 left, right = _bounds(anchors, index, x0_limit, x1_limit)
-                put(anchor.page, anchor.centre, anchor.y + settings.baseline_offset,
+                centre = anchor.placement_x + nudge(line.id, index)
+                put(anchor.page, centre, anchor.y + settings.baseline_offset,
                     text, left, right, x0_limit, x1_limit)
                 drawn += 1
             continue
@@ -158,8 +169,8 @@ def render(score_doc, blank_bytes: bytes, placements, settings: RenderSettings, 
         # where the room is: two syllables now share the space one English word
         # had. Space them by the notes themselves, halfway to each neighbour,
         # which is what an engraver does.
-        seats = [(anchor.centre, (token or "").strip()) for anchor, token
-                 in zip(anchors, tokens or [])]
+        seats = [(anchor.placement_x + nudge(line.id, index), (token or "").strip())
+                 for index, (anchor, token) in enumerate(zip(anchors, tokens or []))]
         seats += [(x, (text or "").strip()) for x, text in extras]
         seats.sort()
         baseline = line.y + settings.baseline_offset

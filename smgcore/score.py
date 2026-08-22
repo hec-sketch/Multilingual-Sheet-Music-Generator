@@ -60,10 +60,24 @@ class Anchor:
     text: str
     line_id: int = -1
     section: str = ""
+    # The x of the notehead this syllable was actually engraved against, when one
+    # could be matched. A printed syllable's own bounding box is not always
+    # centred on its note - italics, kerning and hyphens all shift it - so this is
+    # the more accurate reference point for placing a translated syllable.
+    note_x: float | None = None
 
     @property
     def centre(self) -> float:
         return (self.x0 + self.x1) / 2
+
+    @property
+    def placement_x(self) -> float:
+        """Where a translated syllable should be centred.
+
+        The note it was engraved against when one was found, otherwise the middle
+        of its own printed text (the only reference available for that syllable).
+        """
+        return self.note_x if self.note_x is not None else self.centre
 
 
 @dataclass
@@ -553,8 +567,9 @@ def extract_noteheads(page, page_number: int, staves: list[Staff]) -> list[Noteh
     return unique
 
 
-def attach_held_notes(lines: list[ScoreLine], noteheads: list[Notehead]) -> None:
-    """Record, for each line, the notes inside it that carry no printed syllable.
+def attach_note_positions(lines: list[ScoreLine], noteheads: list[Notehead]) -> None:
+    """Match each anchor to the notehead it was actually engraved against, and
+    record, for each line, any notes inside it that carry no printed syllable.
 
     A syllable sitting under a note is engraved at roughly that note's x. Any note
     between the first and last syllable of a line with nothing under it is one the
@@ -566,15 +581,22 @@ def attach_held_notes(lines: list[ScoreLine], noteheads: list[Notehead]) -> None
         by_staff[(note.page, note.staff)].append(note)
 
     for line in lines:
-        if len(line.anchors) < 2:
+        if len(line.anchors) < 1:
             continue
         first, last = line.anchors[0], line.anchors[-1]
-        notes = [
-            note
-            for note in by_staff.get((line.page, line.staff), [])
-            if first.x0 - 10 <= note.x <= last.x1 + 4
-        ]
-        if len(notes) <= len(line.anchors):
+        notes = sorted(
+            (
+                note
+                for note in by_staff.get((line.page, line.staff), [])
+                if first.x0 - 10 <= note.x <= last.x1 + 4
+            ),
+            key=lambda n: n.x,
+        )
+        # Fewer detected noteheads than syllables means some notes were missed by
+        # the glyph scan (a font quirk, an unusual chord shape); there is nothing
+        # reliable to match against, so leave every anchor's own text box as the
+        # placement reference for this line.
+        if len(notes) < len(line.anchors):
             continue
 
         # Anchors and notes both run left to right and every anchor has a note, so
@@ -594,6 +616,9 @@ def attach_held_notes(lines: list[ScoreLine], noteheads: list[Notehead]) -> None
             cursor = pick + 1
         if len(claimed) != len(line.anchors):
             continue
+
+        for anchor, pick in zip(line.anchors, claimed):
+            anchor.note_x = notes[pick].x
 
         held: list[tuple] = []
         for index, pick in enumerate(claimed):
@@ -685,7 +710,7 @@ def parse_score(pdf_bytes: bytes) -> ScoreDoc:
     noteheads: list[Notehead] = []
     for page_number, page in enumerate(doc):
         noteheads.extend(extract_noteheads(page, page_number, staves_by_page[page_number]))
-    attach_held_notes(lines, noteheads)
+    attach_note_positions(lines, noteheads)
 
     if not sections:
         warnings.append(
