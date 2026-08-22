@@ -106,7 +106,15 @@ def render(score_doc, blank_bytes: bytes, placements, settings: RenderSettings, 
     held = held or {}
     drawn = 0
 
-    def put(page_number, centre, baseline, text, left, right):
+    def put(page_number, centre, baseline, text, left, right, hard_left=None, hard_right=None):
+        # `left`/`right` is the room shared with the neighbouring syllables - used
+        # only to choose a size that (usually) avoids collisions. The translated
+        # syllable is then centred exactly on `centre`, which is the centre of the
+        # English syllable it replaces, even when that means slightly overrunning
+        # a tight neighbour gap: matching the English centring is the point, and a
+        # size chosen from `room` keeps that overrun small in practice. Only the
+        # hard page/staff edge - not the inter-syllable room - is allowed to pull
+        # a syllable off-centre, as a last-resort guard against drawing off the page.
         room = max(right - left, 3.0)
         natural = font.text_length(text, fontsize=settings.max_size)
         size = (
@@ -115,7 +123,9 @@ def render(score_doc, blank_bytes: bytes, placements, settings: RenderSettings, 
             else max(settings.min_size, settings.max_size * room / natural)
         )
         width = font.text_length(text, fontsize=size)
-        x = min(max(centre - width / 2, left), max(left, right - width))
+        x = centre - width / 2
+        if hard_left is not None:
+            x = min(max(x, hard_left), max(hard_left, hard_right - width))
         doc[page_number].insert_text(
             (x, baseline),
             text,
@@ -140,7 +150,7 @@ def render(score_doc, blank_bytes: bytes, placements, settings: RenderSettings, 
                     continue
                 left, right = _bounds(anchors, index, x0_limit, x1_limit)
                 put(anchor.page, anchor.centre, anchor.y + settings.baseline_offset,
-                    text, left, right)
+                    text, left, right, x0_limit, x1_limit)
                 drawn += 1
             continue
 
@@ -160,7 +170,7 @@ def render(score_doc, blank_bytes: bytes, placements, settings: RenderSettings, 
             right = (
                 x1_limit - 1 if index == len(seats) - 1 else (centre + seats[index + 1][0]) / 2
             )
-            put(line.page, centre, baseline, text, left + 0.5, right - 0.5)
+            put(line.page, centre, baseline, text, left + 0.5, right - 0.5, x0_limit, x1_limit)
             drawn += 1
 
     if not drawn:
