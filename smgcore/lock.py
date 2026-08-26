@@ -45,6 +45,8 @@ SECTION_BONUS = 0.75      # the written line is labelled with the section being 
 VOICE_TAG_BONUS = 2.5     # it is labelled for the part now being set
 WRONG_VOICE_TAG = -3.0    # it is labelled for a different part
 CONTINUES_BONUS = 1.5     # it carries straight on from the line just sung
+CONTINUATION_BONUS = 3.0  # the rest of it is what this voice sings next (a wrapped line)
+LOOKAHEAD_WORDS = 4       # how much of the next line on the staff to look at
 NEAR_WORD = 0.6           # one spelling is the opening of the other
 FORWARD_BONUS = 2.0       # it is still to come, rather than already sung
 AHEAD_COST = 0.004        # ... and the nearer it is, the likelier it is
@@ -143,8 +145,11 @@ def _eligible_positions(line: LockLine, voice: str) -> list[int]:
 
 
 def _segment(lock: Lock, wanted: list[str], section: str, voice: str,
-             after: int | None, floor: int):
+             after: int | None, floor: int, following: list[str] | None = None):
     """The best stretch of a written line for the front of what is still to sing.
+
+    ``following`` is the opening of what this same voice sings next, used only to
+    tell apart written lines that the words in hand cannot.
 
     Returns (line number, offset into it, how many syllables it answers for).
     """
@@ -205,6 +210,22 @@ def _segment(lock: Lock, wanted: list[str], section: str, voice: str,
             hint += VOICE_TAG_BONUS if _tag_fits(line.tag, voice) else WRONG_VOICE_TAG
         if after is not None and number == after + 1 and offset == 0:
             hint += CONTINUES_BONUS
+
+        # A line that wraps at the end of a system leaves a fragment - sometimes a
+        # single note - and one word is not enough to say which written line it
+        # opens. 'I' opens both 'I can clearly see' and 'I will not let my hands
+        # drop down'. What settles it is what this voice sings *next*: if this
+        # written line carries on past what the fragment takes, the rest of it
+        # should be the opening of the next line on the staff. Only considered
+        # where the written line does continue, so a line this staff finishes has
+        # nothing to prove.
+        if following and offset + span < len(line.keys):
+            rest = line.keys[offset + span:offset + span + len(following)]
+            if rest:
+                agreed = sum(
+                    _agrees(written, sung) for written, sung in zip(rest, following)
+                ) / len(rest)
+                hint += CONTINUATION_BONUS * agreed
 
         # The layout is written in the order the song is performed, so a voice
         # reads it forwards. The nearest stretch it has not sung yet is the one
@@ -274,7 +295,8 @@ def _fold_same_stream_prefix(line: LockLine, offset: int, token: str) -> str:
     return "".join(prefix) + token
 
 
-def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=None):
+def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=None,
+               following=None):
     """The syllables for one line of the score, and the written lines they came from.
 
     ``cursor`` is how far through the layout this voice has already sung.
@@ -284,9 +306,16 @@ def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=Non
     ``previous`` is the exact syllable the voice left off on, so a line carrying
     straight on from the one before is not mistaken for a fresh entry mid-word.
 
+    ``following`` is the next line this voice sings, so a fragment left by a line
+    wrapping at a system break is read as part of the line it continues into.
+
     Returns (tokens, written line ids, held syllables, cursor, where it left off).
     """
     wanted = [fold(anchor.text) for anchor in score_line.anchors]
+    ahead_words = (
+        [fold(anchor.text) for anchor in following.anchors[:LOOKAHEAD_WORDS]]
+        if following is not None else []
+    )
     need = score_line.note_count
     tokens: list[str] = []
     used: list[int] = []
@@ -296,7 +325,8 @@ def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=Non
     floor = cursor
 
     while len(tokens) < need:
-        found = _segment(lock, wanted[len(tokens):], score_line.section, voice, after, floor)
+        found = _segment(lock, wanted[len(tokens):], score_line.section, voice,
+                         after, floor, ahead_words)
         if found is None:
             tokens.append("")
             ends_at = None
@@ -337,11 +367,12 @@ def plan_voice(voice: str, score_lines, lock: Lock) -> VoicePlan:
     matched = covered = notes_total = 0
     cursor, previous = 0, None
 
-    for line in score_lines:
+    for index, line in enumerate(score_lines):
         need = line.note_count
         notes_total += need
+        following = score_lines[index + 1] if index + 1 < len(score_lines) else None
         tokens, used, held, cursor, previous = place_line(
-            lock, line, voice, cursor, previous
+            lock, line, voice, cursor, previous, following
         )
         filled = sum(1 for token in tokens if token)
         covered += filled

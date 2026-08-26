@@ -16,6 +16,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from smgcore import layout as layout_mod  # noqa: E402
+from smgcore import lock as lock_mod  # noqa: E402
 from smgcore import pairing as pairing_mod  # noqa: E402
 from smgcore import score as score_mod  # noqa: E402
 
@@ -164,3 +165,71 @@ def test_a_cell_printed_low_stays_in_its_own_row():
         f"the opening translated row reads {text_of(opening[0])!r}; "
         "'lla.' was split off into a row of its own"
     )
+
+# --------------------------------------------------------------------------- 5
+
+
+def plan_for(song: str, variant: str):
+    """The whole pipeline for one case: which syllables each voice is given."""
+    folder = os.path.join(_test_data(), song, variant)
+    score_pdf = layout_pdf = None
+    for entry in sorted(os.listdir(folder)):
+        low = entry.lower()
+        if low.startswith("english score"):
+            score_pdf = os.path.join(folder, entry)
+        elif low.startswith("syllabus layout"):
+            layout_pdf = os.path.join(folder, entry)
+
+    score_doc = score_mod.parse_score(open(score_pdf, "rb").read())
+    layout_doc = layout_mod.parse_layout(open(layout_pdf, "rb").read())
+    rows = layout_mod.to_editable(layout_doc, {})
+    english, translated = layout_mod.split_in_half(
+        rows, layout_doc.page_count, score_doc.sung_words()
+    )
+    pairs = pairing_mod.pair_layouts(english, translated).pairs
+    english = layout_mod.inherit_pair_tags(english, pairs, translated)
+    translation = pairing_mod.translation_map(pairs, translated, {}, english)
+    lock = lock_mod.build_lock(english, translation)
+    return score_doc, lock_mod.plan_voices(score_doc, lock, list(score_doc.voices))
+
+
+def test_a_line_wrapping_at_a_system_break_is_read_as_one_line():
+    """A one-note fragment belongs to the line it carries on into.
+
+    Hands Drop Down / KIM breaks 'I will not let my hands drop down.' across a
+    system: the harmony staves carry 'I' alone at the end of one system and
+    'will not let my hands drop down.' at the start of the next. One word cannot
+    say which written line it opens - 'I' opens 'I can clear-ly see' just as
+    well - so the fragment was taking that other line's first syllable, and the
+    syllable it should have had was folded onto the next note as 'Maku'.
+    """
+    _, plans = plan_for("Hands Drop Down", "KIM")
+    plan = plans["Female Harmony 1"]
+    fragments = [a for a in plan.assignments if a.english.strip() == "I"]
+    assert fragments, "no one-word 'I' fragment on this staff"
+    for assignment in fragments:
+        assert assignment.tokens == ["Ma"], (
+            f"the fragment 'I' was given {assignment.tokens!r}; it opens "
+            "'Ma-ku ma-mi ka-nda zo-nda.', the line it carries on into"
+        )
+
+
+@pytest.mark.xfail(reason="not yet fixed: a voice entering mid-line still folds the "
+                          "skipped syllables onto its first note", strict=True)
+def test_a_voice_entering_mid_line_does_not_glue_the_skipped_syllables():
+    """Reproduced, not yet fixed.
+
+    On the staves that re-enter at 'will not let my hands drop down.' with no 'I'
+    engraved, the skipped 'Ma' is folded onto the next note as 'Maku'. The
+    hand-made score prints 'ku' alone there - 'Ma' was already sung on the
+    previous system. Folding is right where a part enters inside a word; it is
+    wrong where the earlier syllables have already been sung.
+    """
+    _, plans = plan_for("Hands Drop Down", "KIM")
+    glued = [
+        (voice, a.score_line_id, token)
+        for voice, plan in plans.items()
+        for a in plan.assignments for token in a.tokens
+        if token.startswith("Maku")
+    ]
+    assert not glued, f"syllables folded onto one note: {glued[:3]}"
