@@ -1,0 +1,32 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+html,body{margin:0;padding:0;background:transparent;overflow:hidden;font-family:system-ui,sans-serif}
+#wrap{position:relative;display:inline-block;max-width:100%}
+#img{display:block;width:100%;height:auto}
+.hot{position:absolute;box-sizing:border-box;border:1.5px solid transparent;border-radius:4px;background:rgba(255,255,255,0.01);cursor:pointer}
+.hot:hover{border-color:rgba(47,61,75,.65);background:rgba(255,255,255,.18)}
+.hot.selected{border-color:#2f3d4b;background:rgba(169,179,156,.25);box-shadow:0 0 0 2px rgba(169,179,156,.28)}
+.tip{position:fixed;left:8px;bottom:8px;padding:4px 8px;background:rgba(247,247,242,.95);border:1px solid #a9b39c;border-radius:6px;font-size:12px;color:#2f3d4b;pointer-events:none}
+</style></head><body>
+<div id="wrap"><img id="img"><div id="hotspots"></div><div class="tip">Click a syllable to select it</div></div>
+<script>
+function send(type,value){window.parent.postMessage({isStreamlitMessage:true,type,value},'*')}
+function ready(){window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:componentReady',apiVersion:1},'*')}
+function height(){window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:setFrameHeight',height:document.body.scrollHeight},'*')}
+function render(args){
+ const img=document.getElementById('img'); const wrap=document.getElementById('wrap'); const hs=document.getElementById('hotspots');
+ img.src='data:image/png;base64,'+args.image; wrap.style.width=(args.width||1000)+'px'; hs.innerHTML='';
+ const scale=1; const hotspots=args.hotspots||[];
+ hotspots.forEach(h=>{
+   const b=document.createElement('button'); b.className='hot'+(args.selected===h.key?' selected':''); b.title=h.label;
+   const w=Math.max(28, Math.min(70, (h.label||'').length*7+18)); const hh=28;
+   b.style.left=(h.x*args.zoom||h.x*1.0)-w/2+'px';
+   b.style.top=(h.y*args.zoom||h.y*1.0)-hh/2+'px'; b.style.width=w+'px'; b.style.height=hh+'px';
+   b.onclick=()=>send('streamlit:setComponentValue',{key:h.key,voice:h.voice,line_id:h.line_id,index:h.index,label:h.label});
+   hs.appendChild(b);
+ });
+ img.onload=height; setTimeout(height,30);
+}
+window.addEventListener('message',e=>{const d=e.data||{};if(d.type==='streamlit:render')render(d.args||{});});
+ready();
+</script></body></html>
