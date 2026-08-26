@@ -39,6 +39,12 @@ MIN_AGREEMENT = 0.6
 # A syllable folded onto the note after it, so a part entering in the middle of a
 # word does not open on the tail of one. One is what a translator will accept.
 MAX_FOLDED_SYLLABLES = 1
+# A syllable this voice has already sung is not folded onto a later note as well:
+# it was printed on its own note, and folding it on again both repeats the word
+# and leaves that note carrying something else. Scoped to the whole piece rather
+# than the page, which is worth six rows across the corpus but costs one each on
+# jwb-143 / Aymara and / KIM, where the same written row is sung again in a later
+# repeat and position alone cannot tell the two repeats apart.
 HYPHENS = ("-", "‐", "‑", "–")
 
 SECTION_BONUS = 0.75      # the written line is labelled with the section being sung
@@ -267,7 +273,8 @@ def _segment(lock: Lock, wanted: list[str], section: str, voice: str,
     return best
 
 
-def _fold_word_start(line: LockLine, offset: int, token: str) -> str:
+def _fold_word_start(line: LockLine, offset: int, token: str,
+                     sung: set | None = None, page: int = -1) -> str:
     """Keep a part entering mid-word from opening on the tail of one.
 
     A harmony often comes in a bar after the lead, on the second syllable of a
@@ -275,8 +282,11 @@ def _fold_word_start(line: LockLine, offset: int, token: str) -> str:
     on 'vá' does not. The syllables before it are folded onto its first note,
     exactly as a translator does by hand.
     """
+    sung = sung or set()
     head: list[str] = []
     back = offset - 1
+    if (line.id, back) in sung:
+        return token
     while (
         back >= 0
         and len(head) < MAX_FOLDED_SYLLABLES
@@ -291,7 +301,8 @@ def _fold_word_start(line: LockLine, offset: int, token: str) -> str:
     return "".join(head) + token
 
 
-def _fold_same_stream_prefix(line: LockLine, offset: int, token: str) -> str:
+def _fold_same_stream_prefix(line: LockLine, offset: int, token: str,
+                             sung: set | None = None, page: int = -1) -> str:
     """Fold skipped translated boxes from the same colored stream onto entry note.
 
     A score voice can begin in the middle of a layout row. If the skipped boxes belong
@@ -308,9 +319,12 @@ def _fold_same_stream_prefix(line: LockLine, offset: int, token: str) -> str:
     current = sem[offset]
     if not current:
         return token
+    sung = sung or set()
     prefix = []
     back = offset - 1
-    while back >= 0 and sem[back] == current:
+    while back >= 0 and sem[back] == current and len(prefix) < MAX_FOLDED_SYLLABLES:
+        if (line.id, back) in sung:
+            break
         value = (line.translated[back] or "").strip()
         if value and value != "-":
             prefix.insert(0, value)
@@ -321,7 +335,7 @@ def _fold_same_stream_prefix(line: LockLine, offset: int, token: str) -> str:
 
 
 def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=None,
-               following=None):
+               following=None, sung: set | None = None):
     """The syllables for one line of the score, and the written lines they came from.
 
     ``cursor`` is how far through the layout this voice has already sung.
@@ -364,11 +378,14 @@ def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=Non
             if index == 0 and offset > 0 and ends_at != (line.id, offset - 1):
                 # First preserve a skipped prefix from the SAME semantic stream
                 # (e.g. We|preach -> Mun-|do => Mun-do for a Lead entry).
-                token = _fold_same_stream_prefix(line, offset, token)
+                token = _fold_same_stream_prefix(line, offset, token, sung)
                 # Then handle the narrower case where the entry begins inside a
                 # hyphenated English word.
-                token = _fold_word_start(line, offset, token) if token == line.translated[offset] else token
+                token = (_fold_word_start(line, offset, token, sung)
+                         if token == line.translated[offset] else token)
             tokens.append(token)
+            if sung is not None:
+                sung.add((line.id, offset + index))
         if line.id not in used:
             used.append(line.id)
         last, after = line, number
@@ -391,13 +408,14 @@ def plan_voice(voice: str, score_lines, lock: Lock) -> VoicePlan:
     assignments: list[Assignment] = []
     matched = covered = notes_total = 0
     cursor, previous = 0, None
+    sung: set[tuple[int, int]] = set()
 
     for index, line in enumerate(score_lines):
         need = line.note_count
         notes_total += need
         following = score_lines[index + 1] if index + 1 < len(score_lines) else None
         tokens, used, held, cursor, previous = place_line(
-            lock, line, voice, cursor, previous, following
+            lock, line, voice, cursor, previous, following, sung
         )
         filled = sum(1 for token in tokens if token)
         covered += filled
