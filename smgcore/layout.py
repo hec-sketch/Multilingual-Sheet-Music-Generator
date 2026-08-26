@@ -447,10 +447,82 @@ def _grid_boxes_for_row(grid_boxes: list[fitz.Rect], row_y: float) -> list[fitz.
     return sorted(candidates, key=lambda r: (r.x0, r.y0))
 
 
+# A band of cells is one printed row. A cell joins the band it overlaps
+# vertically; below this share of its own height it is a row of its own.
+BAND_OVERLAP = 0.45
+# and a band never grows past this much of a single cell, so tightly set rows
+# cannot chain into one another.
+BAND_MAX_HEIGHT = 1.8
+
+
+def _cell_bands(grid_boxes: list[fitz.Rect]) -> list[list[fitz.Rect]]:
+    """Group the drawn cells into printed rows.
+
+    A row is not a line of text, it is a run of cells across the page - and a
+    translator does not always sit every cell of a run on exactly the same line.
+    The last cell of a row is sometimes dropped by half a cell, which is plainly
+    the same row to a reader and, to anything matching on the text baseline, a
+    row of its own holding one syllable.
+
+    Cells are therefore grouped by how much they overlap vertically, not by where
+    their text sits. What keeps this from swallowing the row beneath is the cap on
+    how tall a band may grow: a band is one cell tall, give or take.
+    """
+    bands: list[list[fitz.Rect]] = []
+    for rect in sorted(grid_boxes, key=lambda r: (r.y0, r.x0)):
+        for band in bands:
+            top = min(r.y0 for r in band)
+            bottom = max(r.y1 for r in band)
+            overlap = min(bottom, rect.y1) - max(top, rect.y0)
+            grown = max(bottom, rect.y1) - min(top, rect.y0)
+            tall = statistics.median([r.height for r in band] + [rect.height])
+            if overlap >= BAND_OVERLAP * rect.height and grown <= BAND_MAX_HEIGHT * tall:
+                band.append(rect)
+                break
+        else:
+            bands.append([rect])
+    return [sorted(band, key=lambda r: r.x0) for band in bands]
+
+
+def _rows_by_band(rows: list[list[tuple]], bands: list[list[fitz.Rect]]):
+    """Fold together the text lines that sit in the same band of cells.
+
+    Returns the rows to read (a row that shared a band with the one before it has
+    been folded into it) and, for each, the band of cells it is written in.
+    """
+    if not bands:
+        return list(rows), [None] * len(rows)
+
+    spans = []
+    for band in bands:
+        top = min(rect.y0 for rect in band)
+        bottom = max(rect.y1 for rect in band)
+        spans.append((top, bottom, statistics.median([rect.height for rect in band])))
+
+    def band_of(row: list[tuple]) -> int | None:
+        row_y = statistics.median([word[0] for word in row])
+        best = None
+        for index, (top, bottom, tall) in enumerate(spans):
+            gap = abs(((top + bottom) * 0.5) - (row_y + tall * 0.5))
+            if gap <= max(4.5, tall * 0.75) and (best is None or gap < best[0]):
+                best = (gap, index)
+        return best[1] if best else None
+
+    out_rows: list[list[tuple]] = []
+    out_bands: list[int | None] = []
+    for row in rows:
+        index = band_of(row)
+        if index is not None and out_bands and out_bands[-1] == index:
+            out_rows[-1] = out_rows[-1] + list(row)
+            continue
+        out_rows.append(list(row))
+        out_bands.append(index)
+    return out_rows, out_bands
+
+
 def _grid_tokens_for_row(
     row: list[tuple],
-    grid_boxes: list[fitz.Rect],
-    row_y: float,
+    boxes: list[fitz.Rect],
     color_boxes: dict[tuple[float,float,float,float], str] | None = None,
 ) -> list[Token]:
     """Create exactly one token per drawn grid box, including blank '-' boxes.
@@ -459,7 +531,6 @@ def _grid_tokens_for_row(
     rectangle. This prevents a blank/held box from disappearing and shifting every
     later syllable one column to the left.
     """
-    boxes = _grid_boxes_for_row(grid_boxes, row_y)
     if not boxes:
         return []
 
@@ -1201,16 +1272,35 @@ def parse_layout(pdf_bytes: bytes) -> LayoutDoc:
             "Text outside the boxes (labels, Harmonies notes, reviewer notes, etc.) is ignored."
         )
 
+    # Where the translation half begins. The document is the English layout in
+    # full followed by the translated one, so the join is the page count halved -
+    # the same cut ``split_in_half`` makes later.
+    second_half_starts = len(pages) // 2 if len(pages) >= 2 and not len(pages) % 2 else None
+
     for entry in pages:
         page_number = entry["page"]
+        # A section label is printed once, in the margin, and holds for the rows
+        # beneath it. That is true down a page and on to the next one - and it
+        # stops at the join. The translated half restarts the song from its first
+        # line, so the last label of the English half ("Bridge") must not still be
+        # in force when the translation's opening row is read: a row above the
+        # first label of its own half belongs to no section, exactly as the
+        # corresponding English row does. Left leaking, the two halves' opening
+        # rows are classed differently and can never be paired with each other.
+        if page_number == second_half_starts:
+            current_section = ""
         annot_texts = entry["annots"]
         boxes = entry["boxes"]
         grid_boxes = entry.get("grid_boxes", [])
         harmony_grid_boxes = entry.get("harmony_grid_boxes", [])
         yellow_row_bands = entry.get("yellow_row_bands", [])
         colored_row_bands = entry.get("colored_row_bands", [])
+        # The printed rows of the grid, worked out from the cells themselves, so
+        # a text line is never read as a row the grid does not have.
+        cell_bands = _cell_bands(grid_boxes) if use_grid_boxes else []
+        page_rows, row_bands = _rows_by_band(entry["rows"], cell_bands)
 
-        for row in entry["rows"]:
+        for row_index, row in enumerate(page_rows):
             raw_row_text = normalize_spacing(" ".join(w[3] for w in row))
             # Capture the out-of-box harmony marker before box-first filtering.
             explicit_harmony = bool(HARMONY_MARKER_ANYWHERE.search(raw_row_text))
@@ -1259,7 +1349,13 @@ def parse_layout(pdf_bytes: bytes) -> LayoutDoc:
             # exactly one token per box, including a blank "-" box. This is the
             # crucial distinction between "no text" and "no note".
             if use_grid_boxes:
-                tokens = _grid_tokens_for_row(row, grid_boxes, row_y, entry.get("grid_color_map", {}))
+                band = row_bands[row_index]
+                tokens = _grid_tokens_for_row(
+                    row,
+                    cell_bands[band] if band is not None
+                    else _grid_boxes_for_row(grid_boxes, row_y),
+                    entry.get("grid_color_map", {}),
+                )
             else:
                 tokens = tokenize_words([(w[1], w[2], w[3]) for w in body_words], blank_gap)
             if not tokens:

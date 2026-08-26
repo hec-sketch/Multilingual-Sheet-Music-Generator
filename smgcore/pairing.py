@@ -99,8 +99,36 @@ def _row_geometry(a, b) -> float:
     return 0.55 * count_ratio + 0.45 * endpoint
 
 
-def _is_harmony_row(line) -> bool:
-    return "harmon" in (getattr(line, "tag", "") or "").lower()
+# A row marked harmony on one half only may still be that row on the other, but
+# only when the two grids agree this closely. Below it, the row is an extra one.
+HARMONY_RESCUE_GEOMETRY = 0.88
+
+# How much more it costs to leave the *first* row of a half unpaired than the
+# last. Both halves open on the song's first line, so a gap at the top is the
+# less likely reading. Deliberately small: it only decides between two readings
+# the grid itself cannot tell apart, and must never outweigh what the grid does
+# say (a pairing scores around 17). Raising it to 2.0 loses seven rows on
+# jwb-143 / Aymara.
+EARLY_GAP = 1.5
+
+
+def _may_pair(a, b) -> bool:
+    """Whether these two rows are allowed to be the same row of the song.
+
+    A harmony-only row is the one hard constraint. A translator writes harmony
+    rows the English half does not spell out, and they are short - a two-syllable
+    answering phrase against a whole sung line. Nothing about the grid says they
+    belong together, so a harmony row must never be handed to a lead: it would
+    both put the wrong words on the lead's notes and push every row after it out
+    of step.
+
+    The one exception is a row whose harmony colour survived in only one of the
+    two exports. There the grids still agree cell for cell, so the geometry says
+    what the lost colour would have.
+    """
+    if _is_harmony_row(a) == _is_harmony_row(b):
+        return True
+    return _row_geometry(a, b) >= HARMONY_RESCUE_GEOMETRY
 
 
 def _pair_score(a, b) -> float:
@@ -112,16 +140,11 @@ def _pair_score(a, b) -> float:
         score += 2.5 * (min(ac, bc) / max(ac, bc))
     else:
         score -= 4.0
-    ah, bh = _is_harmony_row(a), _is_harmony_row(b)
-    if ah == bh:
+    if _is_harmony_row(a) == _is_harmony_row(b):
         score += 6.0
     else:
-        # A yellow row can lose its color metadata on one side of an exported PDF.
-        # If its box geometry is excellent, allow the pairing and propagate Harmony;
-        # otherwise treat it as a genuine extra row instead of shifting the run.
-        score -= 5.0
-        if geom >= 0.88:
-            score += 5.5
+        # Only reachable when the geometry rescued the pairing above.
+        score += 0.5
     sa = (a.section or "").strip().lower()
     sb = (b.section or "").strip().lower()
     if sa and sb and sa == sb:
@@ -136,6 +159,18 @@ def _pair_page_rows(above, below):
     n, m = len(above), len(below)
     NEG = -10**9
     gap = -5.5
+
+    def gap_cost(index: int, count: int) -> float:
+        """What it costs to leave the row at ``index`` with nothing opposite it.
+
+        Both halves are the same song and both start at its first line, so a row
+        near the top of one half almost certainly has a counterpart near the top
+        of the other. A half that runs out of rows runs out at the end. Leaving an
+        opening row unpaired is therefore treated as the more suspect reading, and
+        the aligner only does it when the rows genuinely cannot go together.
+        """
+        return gap - EARLY_GAP * (1.0 - index / max(count - 1, 1))
+
     dp = [[NEG] * (m + 1) for _ in range(n + 1)]
     move = [[None] * (m + 1) for _ in range(n + 1)]
     dp[0][0] = 0.0
@@ -144,18 +179,18 @@ def _pair_page_rows(above, below):
             cur = dp[i][j]
             if cur == NEG:
                 continue
-            if i < n and j < m:
+            if i < n and j < m and _may_pair(above[i], below[j]):
                 val = cur + _pair_score(above[i], below[j])
                 if val > dp[i + 1][j + 1]:
                     dp[i + 1][j + 1] = val
                     move[i + 1][j + 1] = ("pair", i, j)
             if i < n:
-                val = cur + gap
+                val = cur + gap_cost(i, n)
                 if val > dp[i + 1][j]:
                     dp[i + 1][j] = val
                     move[i + 1][j] = ("english-only", i, j)
             if j < m:
-                val = cur + gap
+                val = cur + gap_cost(j, m)
                 if val > dp[i][j + 1]:
                     dp[i][j + 1] = val
                     move[i][j + 1] = ("translation-only", i, j)
@@ -198,102 +233,11 @@ def _semantic_class(line) -> str:
         return color
     return "neutral"
 
-def _pair_stream(above, below):
-    """Pair two same-semantic streams monotonically; never cross semantic classes."""
-    return _pair_page_rows(above, below)
-
-
-def _pair_pages_by_semantics(above, below):
-    """Pair rows by visual-semantic class, with Harmony reserved first.
-
-    The critical ordering is:
-      1. Pair Harmony/yellow rows, using geometry-only fallback when one half lost
-         the color metadata.
-      2. Remove any ordinary row consumed by that Harmony fallback.
-      3. Pair the remaining rows inside their color/section streams.
-
-    Thus an extra yellow row can never shift the ordinary/Lead sequence.
-    """
-    results = []
-    used_a: set[int] = set()
-    used_b: set[int] = set()
-
-    harmony_a = [(i, line) for i, line in enumerate(above) if _semantic_class(line) == "harmony"]
-    harmony_b = [(j, line) for j, line in enumerate(below) if _semantic_class(line) == "harmony"]
-
-    # First pair explicit Harmony↔Harmony rows in order.
-    if harmony_a and harmony_b:
-        for (ai, a), (bj, b) in zip(harmony_a, harmony_b):
-            results.append(("pair", ai, bj))
-            used_a.add(ai); used_b.add(bj)
-        for ai, _ in harmony_a[len(harmony_b):]:
-            results.append(("english-only", ai, None)); used_a.add(ai)
-        for bj, _ in harmony_b[len(harmony_a):]:
-            results.append(("translation-only", None, bj)); used_b.add(bj)
-
-    # If only one side retained the Harmony color/marker, recover the counterpart
-    # only when the physical grid strongly agrees. Reserve that counterpart before
-    # normal pairing so it cannot be consumed by the Lead stream.
-    if harmony_a and not harmony_b:
-        for ai, a in harmony_a:
-            best = None
-            for bj, b in enumerate(below):
-                if bj in used_b or _semantic_class(b) == "harmony":
-                    continue
-                geom = _row_geometry(a, b)
-                ratio = min(a.note_count, b.note_count) / max(a.note_count, b.note_count, 1)
-                if geom >= 0.84 and ratio >= 0.55:
-                    score = 8.0 * geom + 2.5 * ratio
-                    if best is None or score > best[0]:
-                        best = (score, bj)
-            if best is not None:
-                results.append(("pair", ai, best[1])); used_a.add(ai); used_b.add(best[1])
-            else:
-                results.append(("english-only", ai, None)); used_a.add(ai)
-    elif harmony_b and not harmony_a:
-        for bj, b in harmony_b:
-            best = None
-            for ai, a in enumerate(above):
-                if ai in used_a or _semantic_class(a) == "harmony":
-                    continue
-                geom = _row_geometry(a, b)
-                ratio = min(a.note_count, b.note_count) / max(a.note_count, b.note_count, 1)
-                if geom >= 0.84 and ratio >= 0.55:
-                    score = 8.0 * geom + 2.5 * ratio
-                    if best is None or score > best[0]:
-                        best = (score, ai)
-            if best is not None:
-                results.append(("pair", best[1], bj)); used_a.add(best[1]); used_b.add(bj)
-            else:
-                results.append(("translation-only", None, bj)); used_b.add(bj)
-
-    # Pair remaining rows strictly by semantic stream order. The syllable layout is
-    # a positional key: once color/section identifies the block, row N in the English
-    # block is row N in the translation block. Do not let word counts or lexical
-    # similarity pull a later row forward and shift everything after it.
-    class_map = {}
-    for i, line in enumerate(above):
-        if i in used_a:
-            continue
-        class_map.setdefault(_semantic_class(line), [[], []])[0].append((i, line))
-    for j, line in enumerate(below):
-        if j in used_b:
-            continue
-        class_map.setdefault(_semantic_class(line), [[], []])[1].append((j, line))
-
-    for cls, (a_items, b_items) in class_map.items():
-        common = min(len(a_items), len(b_items))
-        for k in range(common):
-            results.append(("pair", a_items[k][0], b_items[k][0]))
-        for ai, _ in a_items[common:]:
-            results.append(("english-only", ai, None))
-        for bj, _ in b_items[common:]:
-            results.append(("translation-only", None, bj))
-
-    return sorted(results, key=lambda item: min(
-        item[1] if item[1] is not None else 10**9,
-        item[2] if item[2] is not None else 10**9,
-    ))
+# Rows used to be bucketed by section/colour and then zipped inside each
+# bucket, which is how a bridge row came to be paired with the song's opening
+# line: one bucket having an extra row shifted only that bucket. Pairing is
+# monotone again (``_pair_page_rows``), and the semantics that mattered - a
+# harmony row never going to a lead - are enforced there as a constraint.
 
 
 def pair_layouts(english_lines, translated_lines) -> PairingResult:
@@ -316,7 +260,7 @@ def pair_layouts(english_lines, translated_lines) -> PairingResult:
         translated_pages = [[line for page in translated_pages for line in page]]
 
     for above, below in zip(english_pages, translated_pages):
-        for kind, ai, bj in _pair_pages_by_semantics(above, below):
+        for kind, ai, bj in _pair_page_rows(above, below):
             a = above[ai] if ai is not None else None
             b = below[bj] if bj is not None else None
             if kind == "pair":
