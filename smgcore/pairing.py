@@ -251,13 +251,19 @@ def pair_layouts(english_lines, translated_lines) -> PairingResult:
     ragged = 0
     harmony_unpaired = 0
 
+    # The halves are read as two continuous streams, not page against page. Both
+    # tell the song in the same order, but they do not always break for a new page
+    # in the same place: a translation that needs more room for a chorus pushes the
+    # second verse over the fold, and page-for-page pairing can then never bring
+    # that verse together with its English. The alignment below is monotone, so
+    # nothing is lost by ignoring the fold.
     if len(english_pages) != len(translated_pages):
         notes.append(
             f"The English half is {len(english_pages)} page(s) and the translated half is "
             f"{len(translated_pages)}."
         )
-        english_pages = [[line for page in english_pages for line in page]]
-        translated_pages = [[line for page in translated_pages for line in page]]
+    english_pages = [[line for page in english_pages for line in page]]
+    translated_pages = [[line for page in translated_pages for line in page]]
 
     for above, below in zip(english_pages, translated_pages):
         for kind, ai, bj in _pair_page_rows(above, below):

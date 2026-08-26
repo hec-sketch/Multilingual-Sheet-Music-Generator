@@ -42,6 +42,13 @@ MAX_FOLDED_SYLLABLES = 1
 HYPHENS = ("-", "‐", "‑", "–")
 
 SECTION_BONUS = 0.75      # the written line is labelled with the section being sung
+# ... and if it is labelled with a *different* one, it is the wrong repeat. A
+# chorus sung three times is written out three times, often with a line or two
+# translated differently each time, and the only thing that tells the three
+# apart is the label. Before this, disagreeing merely forfeited the bonus above,
+# which a part tag or a nearer position could outweigh - so a voice singing
+# Chorus 1 could take words written under Ch3.
+WRONG_SECTION = -1.5
 VOICE_TAG_BONUS = 2.5     # it is labelled for the part now being set
 WRONG_VOICE_TAG = -3.0    # it is labelled for a different part
 CONTINUES_BONUS = 1.5     # it carries straight on from the line just sung
@@ -51,6 +58,13 @@ NEAR_WORD = 0.6           # one spelling is the opening of the other
 FORWARD_BONUS = 2.0       # it is still to come, rather than already sung
 AHEAD_COST = 0.004        # ... and the nearer it is, the likelier it is
 BACKWARD_COST = -1.0      # it is behind where this voice has reached
+# What a word the written row does *not* agree with costs, against the words it
+# does. Without this, how much English a stretch accounts for is a plain count,
+# so a long stretch that disagrees in places beats a short one that is exactly
+# right: the score singing 'so much more- than man-y spar-rows.' took the whole
+# of 'You're worth more than man-y spar-rows,' rather than the tail of ''Cause
+# you're worth more- so much more-' and the line after it, which is what it sings.
+MISMATCH_COST = 3.0  # 2.0 works nearly as well; below 2.0 nothing changes
 
 
 @dataclass
@@ -204,10 +218,21 @@ def _segment(lock: Lock, wanted: list[str], section: str, voice: str,
         # is exactly the case they exist for: two written lines carrying the same
         # English and different words, one for the lead and one for the harmony.
         hint = 0.0
-        if wanted_section and normalize_section(line.section) == wanted_section:
-            hint += SECTION_BONUS
+        # Whether this written row belongs to the part of the song being sung.
+        # Unlabelled either side means "no opinion", not "disagrees".
+        row_section = normalize_section(line.section)
+        in_section = not (wanted_section and row_section) or row_section == wanted_section
+        hint += SECTION_BONUS if (wanted_section and row_section and in_section) else 0.0
         if line.tag:
-            hint += VOICE_TAG_BONUS if _tag_fits(line.tag, voice) else WRONG_VOICE_TAG
+            if not _tag_fits(line.tag, voice):
+                hint += WRONG_VOICE_TAG
+            elif in_section:
+                hint += VOICE_TAG_BONUS
+            # A row tagged for this part but written under a different section is
+            # some other repeat's harmony line. It is still eligible - a section
+            # marker can be missing or sit a system away - but its part tag must
+            # not out-argue a row that is in the right place. This is what let a
+            # voice singing Chorus 1 take the harmony row written under Ch3.
         if after is not None and number == after + 1 and offset == 0:
             hint += CONTINUES_BONUS
 
@@ -236,7 +261,7 @@ def _segment(lock: Lock, wanted: list[str], section: str, voice: str,
         ahead = lock.flat(number, offset) - floor
         hint += FORWARD_BONUS - AHEAD_COST * ahead if ahead >= 0 else BACKWARD_COST
 
-        key = (round(hits, 6), hint)
+        key = (round(hits - MISMATCH_COST * (span - hits), 6), hint)
         if best_key is None or key > best_key:
             best, best_key = (number, offset, span), key
     return best
