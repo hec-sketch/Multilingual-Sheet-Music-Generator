@@ -233,3 +233,29 @@ def test_a_voice_entering_mid_line_does_not_glue_the_skipped_syllables():
         if token.startswith("Maku")
     ]
     assert not glued, f"syllables folded onto one note: {glued[:3]}"
+
+
+# --------------------------------------------------------------------------- 6
+
+
+def test_a_doubling_voice_drops_the_words_it_does_not_sing():
+    """A part singing a reduced version of the lead line takes box for box.
+
+    By Faith / WY prints 'faith I move a moun-tain.' on the doubling staff where
+    the lead sings 'faith I can move a moun-tain.'. Every word the part does sing
+    must take the syllable locked to that word, and the box for 'can' must simply
+    be passed over - not folded onto a neighbour, and not left to shift every
+    syllable after it one note early.
+    """
+    _, plans = plan_for("By Faith", "WY")
+    plan = plans["Male Lead Dbl 1"]
+    line = next(
+        a for a in plan.assignments
+        if a.english.split()[:6] == ["faith", "I", "move", "a", "moun", "tain."]
+    )
+    # This staff picks the line up at 'faith', the 'By' having been sung at the
+    # end of the previous system, so the row is read from 'neerü' onwards.
+    assert line.tokens[:6] == ["neerü", "uu-", "kat", "ya-", "la-", "müin;"], (
+        f"the doubling staff was given {line.tokens[:6]!r}; 'chi-' belongs to the "
+        "'can' it does not sing and should have been passed over"
+    )

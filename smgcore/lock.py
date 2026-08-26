@@ -48,13 +48,6 @@ MAX_FOLDED_SYLLABLES = 1
 HYPHENS = ("-", "‐", "‑", "–")
 
 SECTION_BONUS = 0.75      # the written line is labelled with the section being sung
-# ... and if it is labelled with a *different* one, it is the wrong repeat. A
-# chorus sung three times is written out three times, often with a line or two
-# translated differently each time, and the only thing that tells the three
-# apart is the label. Before this, disagreeing merely forfeited the bonus above,
-# which a part tag or a nearer position could outweigh - so a voice singing
-# Chorus 1 could take words written under Ch3.
-WRONG_SECTION = -1.5
 VOICE_TAG_BONUS = 2.5     # it is labelled for the part now being set
 WRONG_VOICE_TAG = -3.0    # it is labelled for a different part
 CONTINUES_BONUS = 1.5     # it carries straight on from the line just sung
@@ -71,6 +64,16 @@ BACKWARD_COST = -1.0      # it is behind where this voice has reached
 # of 'You're worth more than man-y spar-rows,' rather than the tail of ''Cause
 # you're worth more- so much more-' and the line after it, which is what it sings.
 MISMATCH_COST = 3.0  # 2.0 works nearly as well; below 2.0 nothing changes
+# How many written boxes in a row may be passed over between two the score does
+# sing. A doubling part drops a word here and there ('faith I move a moun-tain.'
+# against the lead's 'faith I can move a moun-tain.'); it does not drop half the
+# line. Two keeps it to the omissions a doubling really makes.
+MAX_SKIPPED_BOXES = 1
+# and how much of the line such a reading has to account for before it is
+# believed: fewer boxes than this, or less than this share of what reading
+# straight through would cover, and it is not a doubling but a wrong row.
+SUBSEQUENCE_MINIMUM = 3
+SUBSEQUENCE_SHARE = 0.75
 
 
 @dataclass
@@ -215,7 +218,31 @@ def _segment(lock: Lock, wanted: list[str], section: str, voice: str,
         span = min(len(run), len(wanted))
         if span <= 0:
             continue
+        places = run[:span]
         hits = sum(_agrees(line.keys[run[index]], wanted[index]) for index in range(span))
+
+        # A doubling part sings the lead's line with words left out - the score
+        # prints 'faith I move a moun-tain.' where the lead sings 'faith I can
+        # move a moun-tain.'. Read straight through, the written row disagrees
+        # from the first omission onwards and every syllable after it lands a note
+        # early. Read as a subsequence, each word the part does sing takes the box
+        # locked to it and the box for the word it does not sing is passed over,
+        # which is what the hand-made scores do. The two readings are compared on
+        # what they are worth, not on how far they reach: reading straight through
+        # always reaches further, and that is exactly the mistake.
+        skipped = _subsequence(line, wanted, run)
+        if skipped is not None:
+            boxes, agreed = skipped
+            worth = hits - MISMATCH_COST * (span - hits)
+            # Only a reading where every word this part sings really is the word
+            # written in the box it takes, and which accounts for most of the
+            # line, is a doubling. A loose fit that agrees here and there is just
+            # a wrong row found a different way.
+            exact = agreed >= len(boxes) - 1e-9 and len(boxes) >= SUBSEQUENCE_MINIMUM
+            if exact and len(boxes) >= SUBSEQUENCE_SHARE * span and agreed > worth:
+                places, hits = boxes, agreed
+                span = len(places)
+
         if hits / span < MIN_AGREEMENT:
             continue
 
@@ -269,8 +296,34 @@ def _segment(lock: Lock, wanted: list[str], section: str, voice: str,
 
         key = (round(hits - MISMATCH_COST * (span - hits), 6), hint)
         if best_key is None or key > best_key:
-            best, best_key = (number, offset, span), key
+            best, best_key = (number, places), key
     return best
+
+
+def _subsequence(line: LockLine, wanted: list[str], run: list[int]):
+    """Match the words this voice sings against a row that prints more of them.
+
+    The row is read forwards and may pass over a box or two between matches; the
+    score's words may not be skipped, because every one of them has a note that
+    has to carry something. Returns the box for each word matched, and how well
+    they agreed, or None if it got no further than reading straight through.
+    """
+    places: list[int] = []
+    hits = 0.0
+    cursor = 0
+    for word in wanted:
+        found = None
+        for index in range(cursor, min(len(run), cursor + MAX_SKIPPED_BOXES + 1)):
+            agreed = _agrees(line.keys[run[index]], word)
+            if agreed > 0:
+                found = (index, agreed)
+                break
+        if found is None:
+            break
+        places.append(run[found[0]])
+        hits += found[1]
+        cursor = found[0] + 1
+    return (places, hits) if places else None
 
 
 def _fold_word_start(line: LockLine, offset: int, token: str,
@@ -370,11 +423,16 @@ def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=Non
             tokens.append("")
             ends_at = None
             continue
-        number, offset, span = found
+        number, places = found
         line = lock.lines[number]
-        span = min(span, need - len(tokens))
-        for index in range(span):
-            token = line.translated[offset + index]
+        places = places[:need - len(tokens)]
+        if not places:
+            tokens.append("")
+            ends_at = None
+            continue
+        offset = places[0]
+        for index, position in enumerate(places):
+            token = line.translated[position]
             if index == 0 and offset > 0 and ends_at != (line.id, offset - 1):
                 # First preserve a skipped prefix from the SAME semantic stream
                 # (e.g. We|preach -> Mun-|do => Mun-do for a Lead entry).
@@ -385,12 +443,12 @@ def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=Non
                          if token == line.translated[offset] else token)
             tokens.append(token)
             if sung is not None:
-                sung.add((line.id, offset + index))
+                sung.add((line.id, position))
         if line.id not in used:
             used.append(line.id)
         last, after = line, number
-        ends_at = (line.id, offset + span - 1)
-        floor = lock.flat(number, offset + span)
+        ends_at = (line.id, places[-1])
+        floor = lock.flat(number, places[-1] + 1)
 
     # Anything the translation sings that the English prints no syllable for goes
     # on the notes the English holds, in the order it was written.
