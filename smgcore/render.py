@@ -139,6 +139,13 @@ def render(
     ``held`` maps score-line id -> [(x of a note, syllable)] for syllables that go
     on notes the English holds a vowel across, which have no English syllable of
     their own to sit under.
+
+    Nothing is drawn under a held note beyond its syllable. The engraved English
+    uses an extender line to say "hold this vowel onward", but the translated
+    layout gives those notes syllables of their own, so a line there says
+    nothing the syllable has not already said - and where the layout hyphenated,
+    it actively contradicted it. Hannah asked for them all gone; there is no
+    case left in which one is wanted.
     ``nudges`` maps score-line id -> one horizontal offset in points per printed
     English syllable, for hand-adjusting a placement the automatic centring gets
     wrong. A positive value moves a syllable right, negative moves it left.
@@ -285,17 +292,6 @@ def render(
             color=colour if colour is not None else settings.colour,
         )
 
-    def extender(page_number, x0, x1, baseline):
-        if x1 - x0 < 4:
-            return
-        doc[page_number].draw_line(
-            fitz.Point(x0, baseline + 1.0),
-            fitz.Point(x1, baseline + 1.0),
-            color=settings.colour,
-            width=0.45,
-            overlay=True,
-        )
-
     def vacancy(page_number, centre, baseline, colour):
         """Show a note that was left with no syllable at all."""
         doc[page_number].draw_line(
@@ -340,42 +336,6 @@ def render(
                       for n, (x, text) in enumerate(extras)]
             seats.sort(key=lambda seat: seat[0])
         return seats
-
-    def draw_extender(line, size):
-        """One continuous line under the last run of held notes, if it is owed one.
-
-        Intermediate held noteheads can appear in score parsing, but the visible
-        lyric convention is a single line from the preceding syllable to the end
-        of the run.
-        """
-        anchors = line.anchors
-        if not line.held_notes or not anchors:
-            return
-        extra_x = {round(x, 2) for x, _ in (held.get(line.id) or [])}
-        by_after: dict[int, list[float]] = {}
-        for after_index, x in line.held_notes:
-            by_after.setdefault(after_index, []).append(x)
-        last_after = max(by_after)
-        # A translation that puts its own syllable on those notes needs no line.
-        unoccupied = [x for x in by_after[last_after] if round(x, 2) not in extra_x]
-        if not unoccupied:
-            return
-
-        source_index = min(last_after, len(anchors) - 1)
-        tokens = placements.get(line.id) or []
-        source_text = (tokens[source_index] if source_index < len(tokens) else "").strip()
-        # An extender says "hold this vowel to here", so it belongs only after a
-        # syllable that ends a word. Where the layout hyphenates - "nus-" - the
-        # word carries on to the next note, so the held notes belong to the
-        # syllable that follows and this one is owed no line at all.
-        if not source_text or source_text.endswith("-"):
-            return
-
-        source_x = anchors[source_index].placement_x + nudge(line.id, source_index)
-        start = source_x + font.text_length(source_text, fontsize=size) / 2 + 1.5
-        end = max(unoccupied) - 2.0
-        if end > start + 3:
-            extender(line.page, start, end, line.y + settings.baseline_offset)
 
     # First pass: the largest size each line could take on its own without
     # colliding. Nothing is drawn yet, because no line may choose its own size.
@@ -434,8 +394,6 @@ def render(
                                    "size": size, "text": text, "line_id": line.id,
                                    "slot": slot[0], "index": slot[1]})
             drawn += 1
-
-        draw_extender(line, size)
 
     for page_number, page_shape in shapes.items():
         page_shape.commit(overlay=True)

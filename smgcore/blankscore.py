@@ -23,6 +23,72 @@ from .striptext import strip_font_text
 from .textutil import looks_like_lyric
 
 
+def strip_lyric_extenders(doc, score_doc) -> int:
+    """Take the English extender lines out of the no-lyrics score.
+
+    An extender is the rule an engraver draws after a syllable to say "hold this
+    vowel onward". Emptying the lyric text leaves them behind, because they are
+    drawn line art and not text at all - so the translated score inherited a set
+    of held-note rules belonging to English words that are no longer there, and
+    several of them fell after a syllable the translation hyphenates, telling
+    the singer to hold a vowel the layout has already broken.
+
+    They are identified by where they sit rather than by how they look: a
+    horizontal rule on a sung line's own lyric baseline, inside that staff's
+    span. Nothing else in an engraving lives there - noteheads, stems, beams and
+    ledger lines are all up on the staff, and slurs are curves - so this removes
+    the extenders and only the extenders. It is deliberately not "clear the area
+    under the staff", which is what once took four hundred noteheads with it.
+    """
+    baselines: dict[int, list] = {}
+    for line in score_doc.lines:
+        baselines.setdefault(line.page, []).append(line)
+    spans = {(s.page, s.index): (s.x0, s.x1) for s in score_doc.staves}
+
+    removed = 0
+    for page_number, page in enumerate(doc):
+        lines = baselines.get(page_number) or []
+        if not lines:
+            continue
+        targets = []
+        for drawing in page.get_drawings():
+            for item in drawing["items"]:
+                if item[0] != "l":
+                    continue
+                start, end = item[1], item[2]
+                if abs(start.y - end.y) > 0.4:
+                    continue
+                x0, x1 = sorted((start.x, end.x))
+                if x1 - x0 < 6.0:
+                    continue
+                for line in lines:
+                    # The rule sits on the line's lyric baseline, a little under
+                    # where the syllable's own feet go.
+                    if not (line.y + 2.0 <= start.y <= line.y + 12.0):
+                        continue
+                    left, right = spans.get((line.page, line.staff), (40.0, 560.0))
+                    if left - 8 <= x0 and x1 <= right + 8:
+                        targets.append(pymupdf.Rect(x0 - 0.3, start.y - 0.6,
+                                                    x1 + 0.3, start.y + 0.6))
+                        break
+        if not targets:
+            continue
+        for rect in targets:
+            page.add_redact_annot(rect)
+        # Only line art, only inside these slivers, and only where the sliver
+        # covers the mark completely - so an extender goes and anything merely
+        # passing through, a slur tail or a stem, is left exactly as it was.
+        # Removing what is *touched* rather than what is *covered* is the blunt
+        # instrument that once cost four hundred noteheads a file.
+        page.apply_redactions(
+            images=pymupdf.PDF_REDACT_IMAGE_NONE,
+            graphics=pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED,
+            text=pymupdf.PDF_REDACT_TEXT_NONE,
+        )
+        removed += len(targets)
+    return removed
+
+
 def strip_lyrics(score_bytes: bytes, score_doc) -> tuple[bytes, int]:
     """Return (pdf without its sung lyrics, how many syllables were removed).
 
@@ -47,6 +113,7 @@ def strip_lyrics(score_bytes: bytes, score_doc) -> tuple[bytes, int]:
         base, size = score_doc.lyric_font
         emptied = sum(strip_font_text(page, doc, base, size) for page in doc)
         if emptied and not _lyrics_left(doc, score_doc):
+            strip_lyric_extenders(doc, score_doc)
             return doc.tobytes(), emptied
         doc = pymupdf.open(stream=score_bytes, filetype="pdf")
 

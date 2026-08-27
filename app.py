@@ -1384,11 +1384,18 @@ if step == 5:
             pair.english_id for pair in pairs
             if pair.status != "ok" and pair.english_id is not None
         }
-        resolved_notes = {
-            (int(key.split("||")[1]), int(key.split("||")[2]))
-            for key, state in st.session_state["preview_flags"].items()
-            if state == "resolved" and key.count("||") == 2
-        }
+        # Which notes have been settled by hand. A syllable on a held note is
+        # keyed "...||held3" rather than by a note index, because it has no
+        # English syllable under it to index by - and the attention marks are a
+        # list per English syllable, so those keys have no place here and must
+        # not be read as numbers.
+        resolved_notes = set()
+        for key, state in st.session_state["preview_flags"].items():
+            if state != "resolved" or key.count("||") != 2:
+                continue
+            _, line_id, note = key.split("||")
+            if note.isdigit():
+                resolved_notes.add((int(line_id), int(note)))
         marks: dict[int, list[str]] = {}
         for voice_name, voice_plan in plans.items():
             for assignment in voice_plan.assignments:

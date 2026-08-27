@@ -720,77 +720,110 @@ def _rendered(song, variant, **kwargs):
     return score_doc, plans, placements, held, pdf, layout
 
 
-def test_d21_no_extender_after_a_hyphenated_syllable():
-    """An extender says "hold this vowel to here", so a hyphen forbids it.
+def test_d21_no_extender_lines_at_all():
+    """No rule is left under a held note - the syllable on it says enough.
 
-    Where the layout hyphenates - "nus-" - the word carries on to the next note,
-    so the held notes belong to the syllable that follows, and a line drawn there
-    tells the singer to hold a vowel the layout has already broken.
+    An extender is the line an engraver draws after a syllable to mean "hold
+    this vowel onward". Two of them reached the finished score: one the renderer
+    drew itself, and one it inherited, because emptying the English lyric text
+    leaves the English extenders behind as line art. Several then fell after a
+    syllable the translation hyphenates, contradicting the layout outright.
+    Hannah asked for all of them gone.
 
-    Proved by rendering the same score twice, once as it is and once with those
-    hyphens taken off. Only the hyphen differs, so every extender that appears
-    in the second render and not the first is one the hyphen was suppressing.
+    Checked on the finished score rather than on either step, because that is
+    where she saw them: no horizontal rule may sit on any sung line's baseline.
     """
     import pymupdf as fitz
 
     from smgcore import blankscore, render as render_module
 
-    score_doc, plans = plan_for("Rise Again", "QUB")
-    folder = os.path.join(_test_data(), "Rise Again", "QUB")
-    name = next(e for e in os.listdir(folder) if e.lower().startswith("english score"))
-    blank, _ = blankscore.strip_lyrics(open(os.path.join(folder, name), "rb").read(),
-                                       score_doc)
-    placements = {
-        assignment.score_line_id: list(assignment.tokens)
-        for plan in plans.values() for assignment in plan.assignments
-    }
-    held = {
-        assignment.score_line_id: assignment.held
-        for plan in plans.values() for assignment in plan.assignments
-        if assignment.held
-    }
-    settings = render_module.RenderSettings(
-        max_size=score_doc.lyric_font[1], font_choice=list(render_module.BUNDLED_FONTS)[0]
-    )
+    for song, variant in [("Rise Again", "QUB"), ("By Faith", "QU")]:
+        score_doc, plans = plan_for(song, variant)
+        folder = os.path.join(_test_data(), song, variant)
+        name = next(e for e in os.listdir(folder) if e.lower().startswith("english score"))
+        blank, _ = blankscore.strip_lyrics(open(os.path.join(folder, name), "rb").read(),
+                                           score_doc)
+        placements = {
+            assignment.score_line_id: assignment.tokens
+            for plan in plans.values() for assignment in plan.assignments
+        }
+        held = {
+            assignment.score_line_id: assignment.held
+            for plan in plans.values() for assignment in plan.assignments
+            if assignment.held
+        }
+        assert held, f"{song}/{variant} has no held notes - the test proves nothing"
 
-    def horizontal_lines(pdf_bytes):
-        found = set()
-        for page in fitz.open(stream=pdf_bytes, filetype="pdf"):
+        settings = render_module.RenderSettings(
+            max_size=score_doc.lyric_font[1],
+            font_choice=list(render_module.BUNDLED_FONTS)[0],
+        )
+        pdf = render_module.render(score_doc, blank, placements, settings, held=held)
+
+        on_page = {}
+        for line in score_doc.lines:
+            on_page.setdefault(line.page, []).append(line)
+        offenders = []
+        for page in fitz.open(stream=pdf, filetype="pdf"):
             for drawing in page.get_drawings():
                 for item in drawing["items"]:
-                    if item[0] == "l" and abs(item[1].y - item[2].y) < 0.2:
-                        found.add((page.number, round(item[1].y, 1),
-                                   round(min(item[1].x, item[2].x), 1)))
-        return found
+                    if item[0] != "l" or abs(item[1].y - item[2].y) > 0.4:
+                        continue
+                    x0, x1 = sorted((item[1].x, item[2].x))
+                    if x1 - x0 < 6.0:
+                        continue
+                    for line in on_page.get(page.number, []):
+                        if line.y + 2.0 <= item[1].y <= line.y + 12.0:
+                            offenders.append((page.number + 1, round(item[1].y, 1),
+                                              round(x0, 1), round(x1, 1)))
+                            break
+        assert not offenders, (
+            f"{song}/{variant} still has {len(offenders)} extender(s) on a lyric "
+            f"baseline: {offenders[:4]}"
+        )
 
-    engraved = horizontal_lines(blank)
-    as_written = horizontal_lines(
-        render_module.render(score_doc, blank, placements, settings, held=held)
-    ) - engraved
 
-    # The same score with the hyphen taken off every syllable that owns a held run.
-    opened = {line_id: list(tokens) for line_id, tokens in placements.items()}
-    hyphens = 0
-    for line in score_doc.lines:
-        if not line.held_notes or not line.anchors:
-            continue
-        index = min(max(after for after, _ in line.held_notes), len(line.anchors) - 1)
-        tokens = opened.get(line.id) or []
-        if index < len(tokens) and tokens[index].strip().endswith("-"):
-            tokens[index] = tokens[index].strip().rstrip("-")
-            hyphens += 1
-    assert hyphens, "no held run in this case follows a hyphen - the test proves nothing"
+def test_d21_removing_extenders_costs_no_music():
+    """The extenders go; nothing else does.
 
-    without = horizontal_lines(
-        render_module.render(score_doc, blank, opened, settings, held=held)
-    ) - engraved
+    Clearing the area under a staff is what once deleted several hundred
+    noteheads, stems and rests per file. Each extender is covered by its own
+    sliver and only what the sliver covers completely is removed, so a slur or a
+    stem crossing one survives.
+    """
+    import pymupdf as fitz
 
-    assert without > as_written, (
-        "taking the hyphens off changed no extender, so the hyphen is not being read"
-    )
-    assert not (as_written - without), (
-        "the hyphenated render drew an extender the un-hyphenated one did not"
-    )
+    from smgcore import blankscore, score as score_module
+    from smgcore.striptext import strip_font_text
+
+    def glyphs(pdf_bytes):
+        total = 0
+        for page in fitz.open(stream=pdf_bytes, filetype="pdf"):
+            for block in page.get_text("dict")["blocks"]:
+                for line in block.get("lines", []):
+                    for span in line["spans"]:
+                        total += len(span["text"].strip())
+        return total
+
+    for song, variant in [("Rise Again", "QUB"), ("We Go Preaching", "WY")]:
+        folder = os.path.join(_test_data(), song, variant)
+        name = next(e for e in os.listdir(folder) if e.lower().startswith("english score"))
+        raw = open(os.path.join(folder, name), "rb").read()
+        score_doc = score_module.parse_score(raw)
+
+        doc = fitz.open(stream=raw, filetype="pdf")
+        base, size = score_doc.lyric_font
+        for page in doc:
+            strip_font_text(page, doc, base, size)
+        before = doc.tobytes()
+
+        after_doc = fitz.open(stream=before, filetype="pdf")
+        removed = blankscore.strip_lyric_extenders(after_doc, score_doc)
+        assert removed, f"{song}/{variant} had no extenders - the test proves nothing"
+
+        assert glyphs(after_doc.tobytes()) == glyphs(before), (
+            f"{song}/{variant} lost music glyphs while removing {removed} extenders"
+        )
 
 
 def test_d22_held_note_syllables_can_be_clicked():
