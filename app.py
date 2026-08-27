@@ -354,6 +354,7 @@ def seed_state() -> None:
         ("upload_round", 0),
         ("active_step", 1),
         ("spelling_map", ""),
+        ("spelling_editor", ""),
     ]:
         st.session_state.setdefault(key, default)
 
@@ -995,10 +996,24 @@ if step == 3:
             "correspondence here, one a line, as **`as typed -> as it reads`**:"
         )
         st.code("bu -> bʉ\nkrin -> krĩ\nun -> ũ", language=None)
+        shipped = spelling_mod.available()
+        if shipped:
+            pick, load = st.columns([2, 1])
+            chosen = pick.selectbox(
+                "Language",
+                list(shipped),
+                key="spelling_choice",
+                label_visibility="collapsed",
+                help="The maps written so far. Loading one fills the box below, "
+                     "where it can still be edited before it is applied.",
+            )
+            if load.button("Load map", key="load_spelling"):
+                st.session_state["spelling_editor"] = spelling_mod.load(chosen)
+                st.session_state["spelling_map"] = st.session_state["spelling_editor"]
+                st.rerun()
         st.text_area(
             "Spelling corrections",
             key="spelling_editor",
-            value=st.session_state.get("spelling_map", ""),
             height=160,
             label_visibility="collapsed",
             help="Matching ignores capitals and any punctuation printed around a "

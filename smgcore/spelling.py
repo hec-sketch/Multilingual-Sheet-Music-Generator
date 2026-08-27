@@ -26,7 +26,56 @@ Emberá layout that follows.
 
 from __future__ import annotations
 
+import os
 import unicodedata
+
+# A map written for a language is worth keeping, so the ones already written
+# live beside the app and are offered by name. Adding a language is a matter of
+# putting a .txt here, the way adding a script is a matter of putting a .ttf in
+# 'fonts' - neither needs this file changed.
+MAP_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "spelling")
+
+
+def available() -> dict[str, str]:
+    """The maps that ship with the app, by the name each one calls itself."""
+    out: dict[str, str] = {}
+    if not os.path.isdir(MAP_DIR):
+        return out
+    for filename in sorted(os.listdir(MAP_DIR)):
+        if not filename.lower().endswith(".txt"):
+            continue
+        path = os.path.join(MAP_DIR, filename)
+        out[_title(path) or os.path.splitext(filename)[0]] = path
+    return out
+
+
+def _title(path: str) -> str:
+    """A map's own name, taken from its opening comment line."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            first = handle.readline().strip()
+    except OSError:
+        return ""
+    if not first.startswith("#"):
+        return ""
+    name = first.lstrip("#").strip()
+    for tail in (" spelling map", " map"):
+        if name.lower().endswith(tail):
+            name = name[: -len(tail)]
+            break
+    return name.strip()
+
+
+def load(name: str) -> str:
+    """The text of a shipped map, ready to be shown and edited before it is used."""
+    path = available().get(name)
+    if not path:
+        return ""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+    except OSError:
+        return ""
 
 
 def parse(text: str) -> dict[str, str]:

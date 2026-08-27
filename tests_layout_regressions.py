@@ -1298,6 +1298,24 @@ def test_d28_the_shipped_embera_map_corrects_that_layout():
     )
 
 
+def test_d30_a_shipped_map_is_offered_by_name_and_loads():
+    """A map nobody can find is a map nobody uses.
+
+    The corpus run reads spelling/embera.txt itself, so the tests passed while
+    the app left the box empty and every EMB score still printed `dau` for `daʉ`
+    - which reads as a font that cannot draw the letter rather than as a map
+    that was never loaded. The maps written so far are offered by name.
+    """
+    from smgcore.spelling import available, load, parse
+
+    shipped = available()
+    assert shipped, "no spelling map is being offered"
+    name = next(n for n, p in shipped.items() if p.endswith("embera.txt"))
+    assert "Emberá" in name, f"the map should name its own language, not {name!r}"
+    assert parse(load(name)).get("bu") == "bʉ"
+    assert load("a language with no map") == ""
+
+
 def test_d28_a_rule_may_name_syllables_sung_one_after_another():
     """Emberá `u` is `ʉ̃` in `maʉ̃-ʉ̃-rʉ` and plain `u` in `tai u-no-ta`.
 
