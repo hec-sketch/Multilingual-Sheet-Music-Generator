@@ -755,8 +755,10 @@ for voice_name, voice_plan in plans.items():
             mismatched_lines.append((voice_name, assignment, len(tokens), need))
 
 score_state = "err" if geometry_problems else ("warn" if score_doc.warnings else "ok")
-layout_state = "warn" if layout_trouble else "ok"
-pair_state = "warn" if pair_trouble else "ok"
+# Step 2 is one step now covering both the layout reading and the row-to-row
+# matching, so its status is the worse of the two - either kind of trouble is
+# something to open that step and look at.
+layout_state = "warn" if (layout_trouble or pair_trouble) else "ok"
 # The score step carries what used to be a step of its own: whether every note
 # will be given a syllable. That is a question about the finished score, so it is
 # asked where the score is made rather than one step before it.
@@ -765,14 +767,14 @@ output_state = (
     else ("ok" if st.session_state.get("has_generated") else "todo")
 )
 
-states = [score_state, layout_state, pair_state, output_state]
+states = [score_state, layout_state, output_state]
 outstanding = [
     index for index, state in enumerate(states, start=1) if state in ("warn", "err")
 ]
 
 st.markdown(
     f'<p style="color:{SLATE};margin:-4px 0 12px 0;font-size:1.03rem;">'
-    "Work through the five steps below. Each one shows whether anything needs your "
+    "Work through the three steps below. Each one shows whether anything needs your "
     "attention, and the finished score is produced in Step 3.</p>",
     unsafe_allow_html=True,
 )
