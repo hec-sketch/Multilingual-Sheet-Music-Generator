@@ -48,7 +48,14 @@ SECTION_BONUS = 0.75      # the written line is labelled with the section being 
 VOICE_TAG_BONUS = 2.5     # it is labelled for the part now being set
 WRONG_VOICE_TAG = -3.0    # it is labelled for a different part
 CONTINUES_BONUS = 1.5     # it carries straight on from the line just sung
-CONTINUATION_BONUS = 3.0  # the rest of it is what this voice sings next (a wrapped line)
+# What the voice sings *next* is the strongest evidence there is for which
+# written row a wrapped phrase belongs to, and it has to outweigh the mere
+# preference for a row further ahead in the layout (FORWARD_BONUS below). A
+# staff ending on "You're worth" opens both 'You're worth more than man-y
+# spar-rows,' and ''Cause you're worth more- so much more-'; only the next line
+# on that staff says which. Anything above about 4.0 settles it; 5.0 and 6.5
+# score identically across the corpus.
+CONTINUATION_BONUS = 5.0
 LOOKAHEAD_WORDS = 4       # how much of the next line on the staff to look at
 NEAR_WORD = 0.6           # one spelling is the opening of the other
 FORWARD_BONUS = 2.0       # it is still to come, rather than already sung

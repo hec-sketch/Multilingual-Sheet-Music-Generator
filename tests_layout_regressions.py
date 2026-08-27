@@ -284,3 +284,28 @@ def test_a_syllable_is_not_printed_twice_running():
             f"the entry was given {assignment.tokens!r}; 'na' was sung on the "
             "previous note and must not be folded on again"
         )
+
+
+# --------------------------------------------------------------------------- 8
+
+
+def test_a_phrase_wrapping_at_the_end_of_a_staff_follows_what_comes_next():
+    """The last words of a staff belong to the row the voice carries on into.
+
+    More Than Sparrows / WY ends a staff on "You're worth", which opens two
+    written rows: 'You're worth more than man-y spar-rows,' and ''Cause you're
+    worth more- so much more-'. The next line on that staff sings 'more than man
+    y spar- rows,', so it is the first. Preferring a row further ahead in the
+    layout used to win instead, putting the wrong two syllables on those notes.
+    """
+    _, plans = plan_for("More Than Sparrows", "WY")
+    plan = plans["Lead 1"]
+    wrapped = [
+        a for a in plan.assignments if a.english.rstrip().endswith("You're worth")
+    ]
+    assert wrapped, "no staff ends on \"You're worth\""
+    for assignment in wrapped:
+        assert assignment.tokens[-2:] == ["Jee", "a-"], (
+            f"the staff ended with {assignment.tokens[-2:]!r}; the voice goes on to "
+            "sing 'more than man y spar- rows,', so these notes carry 'Jee a-'"
+        )
