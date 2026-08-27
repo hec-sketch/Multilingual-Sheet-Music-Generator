@@ -387,8 +387,23 @@ def _fold_same_stream_prefix(line: LockLine, offset: int, token: str,
     return "".join(prefix) + token
 
 
+def _repeats_what_was_just_sung(combined: str, token: str, last: str) -> bool:
+    """Whether a fold has put the syllable just sung onto this note as well.
+
+    The guard on already-sung boxes catches a part re-entering the same written
+    row. It cannot catch the same syllable arriving from a *different* row - a
+    repeat written out again elsewhere - which is how 'Ka-' followed by
+    'Ka-teerü' and 'Pai' followed by 'Pai-cu-' get printed. Nobody sets the same
+    syllable twice running, so the text itself is the test.
+    """
+    if not last or combined == token:
+        return False
+    prefix = combined[: len(combined) - len(token)]
+    return bool(prefix) and fold(prefix).strip("-") == fold(last).strip("-")
+
+
 def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=None,
-               following=None, sung: set | None = None):
+               following=None, sung: set | None = None, previous_text: str = ""):
     """The syllables for one line of the score, and the written lines they came from.
 
     ``cursor`` is how far through the layout this voice has already sung.
@@ -409,6 +424,7 @@ def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=Non
         if following is not None else []
     )
     need = score_line.note_count
+    last_text = previous_text
     tokens: list[str] = []
     used: list[int] = []
     last: LockLine | None = None
@@ -434,6 +450,7 @@ def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=Non
         for index, position in enumerate(places):
             token = line.translated[position]
             if index == 0 and offset > 0 and ends_at != (line.id, offset - 1):
+                plain = token
                 # First preserve a skipped prefix from the SAME semantic stream
                 # (e.g. We|preach -> Mun-|do => Mun-do for a Lead entry).
                 token = _fold_same_stream_prefix(line, offset, token, sung)
@@ -441,7 +458,11 @@ def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=Non
                 # hyphenated English word.
                 token = (_fold_word_start(line, offset, token, sung)
                          if token == line.translated[offset] else token)
+                if _repeats_what_was_just_sung(token, plain, last_text):
+                    token = plain
             tokens.append(token)
+            if token:
+                last_text = token
             if sung is not None:
                 sung.add((line.id, position))
         if line.id not in used:
@@ -466,6 +487,7 @@ def plan_voice(voice: str, score_lines, lock: Lock) -> VoicePlan:
     assignments: list[Assignment] = []
     matched = covered = notes_total = 0
     cursor, previous = 0, None
+    last_text = ""
     sung: set[tuple[int, int]] = set()
 
     for index, line in enumerate(score_lines):
@@ -473,8 +495,11 @@ def plan_voice(voice: str, score_lines, lock: Lock) -> VoicePlan:
         notes_total += need
         following = score_lines[index + 1] if index + 1 < len(score_lines) else None
         tokens, used, held, cursor, previous = place_line(
-            lock, line, voice, cursor, previous, following, sung
+            lock, line, voice, cursor, previous, following, sung, last_text
         )
+        for token in tokens:
+            if token:
+                last_text = token
         filled = sum(1 for token in tokens if token)
         covered += filled
         if filled == need and need:

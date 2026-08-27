@@ -259,3 +259,30 @@ def test_a_doubling_voice_drops_the_words_it_does_not_sing():
         f"the doubling staff was given {line.tokens[:6]!r}; 'chi-' belongs to the "
         "'can' it does not sing and should have been passed over"
     )
+
+
+# --------------------------------------------------------------------------- 7
+
+
+def test_a_syllable_is_not_printed_twice_running():
+    """A fold must not put back the syllable the voice has just sung.
+
+    Where a written row is picked up part-way through, the syllables before the
+    entry are folded onto the first note so that a part does not open on the tail
+    of a word. When the voice has just sung that syllable on a note of its own,
+    folding it on again prints it twice: We Go Preaching / QII sang
+    'Shuj- cu- na-' at the end of one system and then set 'na-|pa' as 'napa' on
+    the first note of the next, so 'na' appeared on two notes running.
+    """
+    _, plans = plan_for("We Go Preaching", "QII")
+    plan = plans["Female Lead 1"]
+    entries = [
+        a for a in plan.assignments
+        if a.english.strip().startswith("go, there fore")
+    ]
+    assert entries, "the 'go, therefore,' entry is not on this staff"
+    for assignment in entries:
+        assert assignment.tokens[0] == "pa", (
+            f"the entry was given {assignment.tokens!r}; 'na' was sung on the "
+            "previous note and must not be folded on again"
+        )
