@@ -324,29 +324,42 @@ def _subsequence(line: LockLine, wanted: list[str], run: list[int]):
 
 
 def _fold_word_start(line: LockLine, offset: int, token: str,
-                     sung: set | None = None, page: int = -1) -> str:
+                     sung: set | None = None, page: int = -1,
+                     rows_sung: set | None = None) -> str:
     """Keep a part entering mid-word from opening on the tail of one.
 
     A harmony often comes in a bar after the lead, on the second syllable of a
     word. In English that still reads; where the phrase opens 'Jeho-vá', opening
-    on 'vá' does not. The syllables before it are folded onto its first note,
+    on 'vá' does not. The syllable before it is folded onto its first note,
     exactly as a translator does by hand.
+
+    Which syllable is mid-word is decided by the **translation**, not by the
+    English. The two languages do not break their words in the same places: the
+    Aymara 'Jeho-|vá' sits under the English 'I | will', and the English words
+    carry no hyphen at all. Reading the English side, as this once did, meant the
+    fold never fired on precisely the entries the hand-made scores do fold -
+    'Jeho-vá', 'i-man', 'ya-nap' - while a translation that does *not* continue
+    ('Pay | la-doy') is left alone, which is also what they do.
+
+    A syllable this voice has already sung on a note of its own is never folded
+    on again, however the word is broken.
     """
     sung = sung or set()
-    head: list[str] = []
     back = offset - 1
-    if (line.id, back) in sung:
+    if back < 0 or (line.id, back) in sung:
         return token
-    while (
-        back >= 0
-        and len(head) < MAX_FOLDED_SYLLABLES
-        and line.english[back].rstrip().endswith(HYPHENS)
-    ):
-        head.insert(0, line.translated[back].rstrip())
-        back -= 1
-    if not head:
+    if line.id in (rows_sung or set()):
+        # This voice has been through this written row already, so the syllable
+        # before the entry is one it has sung on a note of its own; the hand-made
+        # scores leave the entry note to open on its own box. Folding belongs to a
+        # part meeting the row for the first time.
         return token
-    if back >= 0 and line.english[back].rstrip().endswith(HYPHENS):
+    if not line.translated[back].rstrip().endswith(HYPHENS):
+        return token  # the written word ends there; this note opens a new one
+    head = [line.translated[back].rstrip()]
+    if len(head) > MAX_FOLDED_SYLLABLES:
+        return token
+    if back - 1 >= 0 and line.translated[back - 1].rstrip().endswith(HYPHENS):
         return token  # the word runs back further than we may fold
     return "".join(head) + token
 
@@ -367,7 +380,8 @@ def _repeats_what_was_just_sung(combined: str, token: str, last: str) -> bool:
 
 
 def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=None,
-               following=None, sung: set | None = None, previous_text: str = ""):
+               following=None, sung: set | None = None, previous_text: str = "",
+               rows_sung: set | None = None):
     """The syllables for one line of the score, and the written lines they came from.
 
     ``cursor`` is how far through the layout this voice has already sung.
@@ -420,7 +434,7 @@ def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=Non
                 pass  # EXPERIMENT: stream fold disabled
                 # Then handle the narrower case where the entry begins inside a
                 # hyphenated English word.
-                token = (_fold_word_start(line, offset, token, sung)
+                token = (_fold_word_start(line, offset, token, sung, -1, rows_sung)
                          if token == line.translated[offset] else token)
                 if _repeats_what_was_just_sung(token, plain, last_text):
                     token = plain
@@ -431,6 +445,8 @@ def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=Non
                 sung.add((line.id, position))
         if line.id not in used:
             used.append(line.id)
+        if rows_sung is not None:
+            rows_sung.add(line.id)
         last, after = line, number
         ends_at = (line.id, places[-1])
         floor = lock.flat(number, places[-1] + 1)
@@ -453,13 +469,15 @@ def plan_voice(voice: str, score_lines, lock: Lock) -> VoicePlan:
     cursor, previous = 0, None
     last_text = ""
     sung: set[tuple[int, int]] = set()
+    rows_sung: set[int] = set()
 
     for index, line in enumerate(score_lines):
         need = line.note_count
         notes_total += need
         following = score_lines[index + 1] if index + 1 < len(score_lines) else None
         tokens, used, held, cursor, previous = place_line(
-            lock, line, voice, cursor, previous, following, sung, last_text
+            lock, line, voice, cursor, previous, following, sung, last_text,
+            rows_sung
         )
         for token in tokens:
             if token:
