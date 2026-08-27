@@ -19,6 +19,7 @@ from __future__ import annotations
 import pymupdf
 
 from .score import _lyric_bands, _spans
+from .striptext import strip_font_text
 from .textutil import looks_like_lyric
 
 
@@ -31,6 +32,23 @@ def strip_lyrics(score_bytes: bytes, score_doc) -> tuple[bytes, int]:
     and staff lines that happen to fall inside a removed syllable's box survive.
     """
     doc = pymupdf.open(stream=score_bytes, filetype="pdf")
+
+    # The lyrics are their own font at their own size, used for nothing else in
+    # any score seen so far, so they can be removed by name rather than by area:
+    # the content stream's text-showing operators are emptied where that font is
+    # selected, and every other mark on the page is left exactly as it was.
+    #
+    # This replaces redaction, which deletes any glyph whose box merely touches
+    # the area being cleared. Lyrics sit right under the staff, so that took
+    # noteheads, stems, ties and rests with them - between one and four hundred
+    # music glyphs on the reference scores, every time. The redaction path is
+    # kept below as a fallback for a score this does not fit.
+    if score_doc.lyric_font:
+        base, size = score_doc.lyric_font
+        emptied = sum(strip_font_text(page, doc, base, size) for page in doc)
+        if emptied and not _lyrics_left(doc, score_doc):
+            return doc.tobytes(), emptied
+        doc = pymupdf.open(stream=score_bytes, filetype="pdf")
 
     staves_by_page: dict[int, list] = {}
     for staff in score_doc.staves:
@@ -66,3 +84,26 @@ def strip_lyrics(score_bytes: bytes, score_doc) -> tuple[bytes, int]:
             removed += marked
 
     return doc.tobytes(), removed
+
+
+def _lyrics_left(doc, score_doc) -> bool:
+    """Whether any sung lyric survived - the check that decides to fall back."""
+    staves_by_page: dict[int, list] = {}
+    for staff in score_doc.staves:
+        staves_by_page.setdefault(staff.page, []).append(staff)
+    for page_number, page in enumerate(doc):
+        staves = staves_by_page.get(page_number, [])
+        if not staves:
+            continue
+        bands = _lyric_bands(staves, page.rect.height)
+        for span in _spans(page):
+            if (span["font"], round(span["size"], 1)) != score_doc.lyric_font:
+                continue
+            if not looks_like_lyric(span["text"].strip()):
+                continue
+            x0, y0, x1, y1 = span["bbox"]
+            middle = (y0 + y1) / 2
+            for staff, (top, bottom) in zip(staves, bands):
+                if top <= middle <= bottom and staff.x0 - 8 <= x0 <= staff.x1 + 8:
+                    return True
+    return False

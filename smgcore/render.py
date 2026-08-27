@@ -150,8 +150,47 @@ def render(
         shifts = nudges.get(line_id)
         return shifts[index] if shifts and index < len(shifts) else 0.0
 
+    GAP = 1.2  # the clear space left between one syllable and the next
+
+    def uniform_size(seats, x0_limit, x1_limit):
+        """The largest one size at which a whole line of syllables does not collide.
+
+        An engraver sets a line of lyrics at a single size, so the question is
+        not how big each syllable could be on its own but how big they can all
+        be together. Two neighbours clear each other when half of each fits in
+        the space between their notes:
+
+            width(a)/2 + width(b)/2 + gap <= centre(b) - centre(a)
+
+        Every width scales with the size, so each neighbouring pair caps the size
+        directly, and the smallest cap over the line is the answer. Sizing each
+        syllable against the room between its neighbours - as this did - measures
+        the wrong thing twice over: the syllable is drawn centred on its own note,
+        which is not the middle of that room, and the neighbour's own width is
+        never counted at all. Both errors let a syllable overrun at a size that
+        looked like a fit.
+        """
+        drawn = [(centre, text) for centre, text in seats if text]
+        if not drawn:
+            return settings.max_size
+        natural = [font.text_length(text, fontsize=settings.max_size) for _, text in drawn]
+        size = settings.max_size
+
+        def cap(room, needed):
+            nonlocal size
+            if needed > 0:
+                size = min(size, settings.max_size * max(room, 0.5) / needed)
+
+        for index in range(len(drawn) - 1):
+            cap(drawn[index + 1][0] - drawn[index][0] - GAP,
+                (natural[index] + natural[index + 1]) / 2.0)
+        # And neither end may run off the staff.
+        cap(drawn[0][0] - (x0_limit + 1), natural[0] / 2.0)
+        cap((x1_limit - 1) - drawn[-1][0], natural[-1] / 2.0)
+        return max(settings.min_size, size)
+
     def put(page_number, centre, baseline, text, left, right, hard_left=None,
-            hard_right=None, colour=None):
+            hard_right=None, colour=None, size=None):
         # `left`/`right` is the room shared with the neighbouring syllables - used
         # only to choose a size that (usually) avoids collisions. The translated
         # syllable is then centred exactly on `centre`, which is the centre of the
@@ -160,13 +199,13 @@ def render(
         # size chosen from `room` keeps that overrun small in practice. Only the
         # hard page/staff edge - not the inter-syllable room - is allowed to pull
         # a syllable off-centre, as a last-resort guard against drawing off the page.
-        room = max(right - left, 3.0)
-        natural = font.text_length(text, fontsize=settings.max_size)
-        size = (
-            settings.max_size
-            if natural <= room
-            else max(settings.min_size, settings.max_size * room / natural)
-        )
+        #
+        # `size` is settled for the whole line by the caller. An engraver sets a
+        # line of lyrics at one size; sizing each syllable on its own room makes
+        # one long word come out visibly smaller than the words either side of it,
+        # which reads as a mistake even when the syllable is right.
+        if size is None:
+            size = fitted_size(text, left, right)
         width = font.text_length(text, fontsize=size)
         x = centre - width / 2
         if hard_left is not None:
@@ -210,6 +249,15 @@ def render(
         x0_limit, x1_limit = staff_span.get((line.page, line.staff), (40.0, 560.0))
 
         if not extras:
+            # One size for the whole line, chosen so that none of it collides.
+            line_size = uniform_size(
+                [
+                    (anchor.placement_x + nudge(line.id, index),
+                     _wrapped_token(line, index, token, len(tokens or [])))
+                    for index, (anchor, token) in enumerate(zip(anchors, tokens or []))
+                ],
+                x0_limit, x1_limit,
+            )
             for index, (anchor, token) in enumerate(zip(anchors, tokens or [])):
                 text = _wrapped_token(line, index, token, len(tokens or []))
                 if not text:
@@ -225,7 +273,7 @@ def render(
                 centre = anchor.placement_x + nudge(line.id, index)
                 put(anchor.page, centre, anchor.y + settings.baseline_offset,
                     text, left, right, x0_limit, x1_limit,
-                    colour=mark_colour(line.id, index))
+                    colour=mark_colour(line.id, index), size=line_size)
                 drawn += 1
             continue
 
@@ -242,15 +290,22 @@ def render(
         seats += [(x, (text or "").strip(), settings.colour) for x, text in extras]
         seats.sort(key=lambda seat: seat[0])
         baseline = line.y + settings.baseline_offset
-        for index, (centre, text, colour) in enumerate(seats):
-            if not text:
-                continue
+
+        def seat_room(index, centre):
             left = x0_limit + 1 if index == 0 else (seats[index - 1][0] + centre) / 2
             right = (
                 x1_limit - 1 if index == len(seats) - 1 else (centre + seats[index + 1][0]) / 2
             )
-            put(line.page, centre, baseline, text, left + 0.5, right - 0.5,
-                x0_limit, x1_limit, colour=colour)
+            return left + 0.5, right - 0.5
+
+        seat_size = uniform_size([(centre, text) for centre, text, _ in seats],
+                                 x0_limit, x1_limit)
+        for index, (centre, text, colour) in enumerate(seats):
+            if not text:
+                continue
+            left, right = seat_room(index, centre)
+            put(line.page, centre, baseline, text, left, right,
+                x0_limit, x1_limit, colour=colour, size=seat_size)
             drawn += 1
 
         # Draw one continuous lyric extender for the final held-note run.

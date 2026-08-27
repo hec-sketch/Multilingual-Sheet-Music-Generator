@@ -31,6 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .align import Assignment, VoicePlan, _tag_fits, normalize_section
+from .layout import BLANK_BOX
 from .textutil import fold
 
 # How much of a stretch has to be recognised before its translation is trusted.
@@ -76,6 +77,12 @@ MAX_SKIPPED_BOXES = 1
 # and how much of the line such a reading has to account for before it is
 # believed: fewer boxes than this, or less than this share of what reading
 # straight through would cover, and it is not a doubling but a wrong row.
+# The layout writes the English with the punctuation the engraving prints, and
+# a repeated line is very often repeated with different punctuation - 'trust in
+# you.' in the chorus, 'trust in you!' at the end of the song. Where two written
+# rows carry the same words, that is real evidence about which one is being sung,
+# and folding the words for comparison throws it away.
+PUNCTUATION_AGREES = 1.0
 SUBSEQUENCE_MINIMUM = 3
 SUBSEQUENCE_SHARE = 0.75
 
@@ -156,13 +163,22 @@ def _agrees(written: str, sung: str) -> float:
     return 0.0
 
 
-def _eligible_positions(line: LockLine, voice: str) -> list[int]:
+def _eligible_positions(line: LockLine, voice: str, relaxed: bool = False) -> list[int]:
     """Token-level routing for mixed rows.
 
     If a written row contains any yellow Harmony boxes, Lead voices may use only
     the non-Harmony boxes and harmony voices may use only the yellow boxes. Rows
     without yellow boxes keep the normal voice-routing behavior.
+
+    The routing says which part sings those words *here*. It does not say the
+    words are barred from the other part everywhere in the song: a line written
+    once, in yellow, as the harmony's answer at the end of one chorus may well be
+    sung by the lead at another repeat the layout does not write out again. So
+    ``relaxed`` drops the routing, for the second pass in ``_segment`` that is
+    made only when respecting it would leave the notes with nothing at all.
     """
+    if relaxed:
+        return list(range(len(line.keys)))
     sem = line.semantic if len(line.semantic) == len(line.keys) else [""] * len(line.keys)
     if not any(c == "harmony" for c in sem):
         return list(range(len(line.keys)))
@@ -171,8 +187,47 @@ def _eligible_positions(line: LockLine, voice: str) -> list[int]:
     return [i for i, c in enumerate(sem) if c == "harmony"]
 
 
+def _tail_stop(text: str) -> str:
+    """The sentence punctuation a printed word ends with, if any.
+
+    A hyphen is a syllable break rather than punctuation, and is ignored; so is
+    anything before the last alphanumeric character.
+    """
+    tail = ""
+    for char in reversed(text or ""):
+        if char.isalnum():
+            break
+        if char in ".,;:!?":
+            tail = char + tail
+    return tail
+
+
+def _stops_agree(line: LockLine, places: list[int], printed: list[str]) -> float:
+    """How much the punctuation of a written row and of the engraving agree.
+
+    Only the stop that ends the written row is read. That is where a repeat
+    differs from the line it repeats - 'trust in you.' in the chorus against
+    'trust in you!' at the end of the song - and it is the one place the
+    engraving and the layout can be relied on to agree. Punctuation inside a
+    line is set to taste by whoever typed each document, and reading it there
+    costs more rows than it wins.
+
+    Only agreement counts. A disagreement is not evidence against a row: an
+    engraver may punctuate a repeat differently, or not at all.
+    """
+    if not places or not printed:
+        return 0.0
+    last = min(len(places), len(printed)) - 1
+    position = places[last]
+    if position != len(line.english) - 1:
+        return 0.0  # this stretch does not reach the end of the written row
+    written = _tail_stop(line.english[position])
+    return 1.0 if written and written == _tail_stop(printed[last]) else 0.0
+
+
 def _segment(lock: Lock, wanted: list[str], section: str, voice: str,
-             after: int | None, floor: int, following: list[str] | None = None):
+             after: int | None, floor: int, following: list[str] | None = None,
+             printed: list[str] | None = None):
     """The best stretch of a written line for the front of what is still to sing.
 
     ``following`` is the opening of what this same voice sings next, used only to
@@ -183,125 +238,155 @@ def _segment(lock: Lock, wanted: list[str], section: str, voice: str,
     if not lock.lines or not wanted:
         return None
 
-    starts: set[tuple[int, int]] = set()
-    for lead in range(min(4, len(wanted))):
-        for number, position in lock.index.get(wanted[lead], ()):
-            eligible = _eligible_positions(lock.lines[number], voice)
-            if position not in eligible:
-                continue
-            start = position - lead
-            if start < 0:
-                continue
-            # The matched stretch must stay inside one contiguous semantic run.
-            if all(start + k in eligible for k in range(lead + 1)):
-                starts.add((number, start))
-    if after is not None and after + 1 < len(lock.lines):
-        eligible = _eligible_positions(lock.lines[after + 1], voice)
-        if eligible:
-            starts.add((after + 1, eligible[0]))  # carry on within this voice's stream
-
-
     wanted_section = normalize_section(section)
-    best = None
-    best_key = None
-    for number, offset in sorted(starts):
-        line = lock.lines[number]
-        # Explicit part tags are hard routing constraints, not merely a scoring
-        # preference. A harmony-only row (yellow boxes or “(Harmonies)”) must never
-        # be eligible for a lead, and a lead-only/ad-lib row must not be consumed by
-        # an unrelated harmony. This is the protection that prevents harmony lyrics
-        # from leaking into the lead when the English words happen to be identical.
-        if line.tag and not _tag_fits(line.tag, voice):
-            continue
-        eligible = _eligible_positions(line, voice)
-        if offset not in eligible:
-            continue
-        run = [offset]
-        while run[-1] + 1 in eligible:
-            run.append(run[-1] + 1)
-        span = min(len(run), len(wanted))
-        if span <= 0:
-            continue
-        places = run[:span]
-        hits = sum(_agrees(line.keys[run[index]], wanted[index]) for index in range(span))
 
-        # A doubling part sings the lead's line with words left out - the score
-        # prints 'faith I move a moun-tain.' where the lead sings 'faith I can
-        # move a moun-tain.'. Read straight through, the written row disagrees
-        # from the first omission onwards and every syllable after it lands a note
-        # early. Read as a subsequence, each word the part does sing takes the box
-        # locked to it and the box for the word it does not sing is passed over,
-        # which is what the hand-made scores do. The two readings are compared on
-        # what they are worth, not on how far they reach: reading straight through
-        # always reaches further, and that is exactly the mistake.
-        skipped = _subsequence(line, wanted, run)
-        if skipped is not None:
-            boxes, agreed = skipped
-            worth = hits - MISMATCH_COST * (span - hits)
-            # Only a reading where every word this part sings really is the word
-            # written in the box it takes, and which accounts for most of the
-            # line, is a doubling. A loose fit that agrees here and there is just
-            # a wrong row found a different way.
-            exact = agreed >= len(boxes) - 1e-9 and len(boxes) >= SUBSEQUENCE_MINIMUM
-            if exact and len(boxes) >= SUBSEQUENCE_SHARE * span and agreed > worth:
-                places, hits = boxes, agreed
-                span = len(places)
+    def openings(relaxed: bool) -> set[tuple[int, int]]:
+        starts: set[tuple[int, int]] = set()
+        for lead in range(min(4, len(wanted))):
+            for number, position in lock.index.get(wanted[lead], ()):
+                eligible = _eligible_positions(lock.lines[number], voice, relaxed)
+                if position not in eligible:
+                    continue
+                start = position - lead
+                if start < 0:
+                    continue
+                # The matched stretch must stay inside one contiguous semantic run.
+                if all(start + k in eligible for k in range(lead + 1)):
+                    starts.add((number, start))
+        if after is not None and after + 1 < len(lock.lines):
+            eligible = _eligible_positions(lock.lines[after + 1], voice, relaxed)
+            if eligible:
+                starts.add((after + 1, eligible[0]))  # carry on within this voice's stream
+        return starts
 
-        if hits / span < MIN_AGREEMENT:
-            continue
+    def search(allow_tagged: bool):
+        best = None
+        best_key = None
+        candidates = sorted(openings(allow_tagged))
+        # Which part a row is written for outranks how it is punctuated. Layouts
+        # routinely leave the full stop off their harmony rows as a typing habit
+        # while the engraving prints it, so where this voice has a row written
+        # for it among the candidates, punctuation is not allowed to pull it onto
+        # an untagged row instead. It is there to separate repeats of the same
+        # line, not to decide which part is singing.
+        own_row = any(
+            lock.lines[number].tag and _tag_fits(lock.lines[number].tag, voice)
+            for number, _ in candidates
+        )
+        for number, offset in candidates:
+            line = lock.lines[number]
+            # Explicit part tags route a row to the part it is written for: a
+            # harmony-only row (yellow boxes or "(Harmonies)") is not offered to a
+            # lead, and a lead-only row is not consumed by a harmony. This is what
+            # keeps a two-syllable answering phrase out of the lead's line when the
+            # English words happen to be identical.
+            #
+            # It is a rule about *this row*, though, not about the words on it. The
+            # last line of a chorus can be written once, tagged for the harmony that
+            # answers it there, and still be sung by the lead somewhere else in the
+            # song. So the tag only rules a row out while some other row can answer
+            # for the same words - which is what ``allow_tagged`` is for below: a
+            # second pass, made only when the first found nothing at all, where a row
+            # written for another part is better than leaving the notes silent.
+            if line.tag and not _tag_fits(line.tag, voice) and not allow_tagged:
+                continue
+            eligible = _eligible_positions(line, voice, allow_tagged)
+            if offset not in eligible:
+                continue
+            run = [offset]
+            while run[-1] + 1 in eligible:
+                run.append(run[-1] + 1)
+            span = min(len(run), len(wanted))
+            if span <= 0:
+                continue
+            places = run[:span]
+            hits = sum(_agrees(line.keys[run[index]], wanted[index]) for index in range(span))
 
-        # How much of the English this stretch actually accounts for decides it.
-        # The labels below only separate stretches that agree equally well - which
-        # is exactly the case they exist for: two written lines carrying the same
-        # English and different words, one for the lead and one for the harmony.
-        hint = 0.0
-        # Whether this written row belongs to the part of the song being sung.
-        # Unlabelled either side means "no opinion", not "disagrees".
-        row_section = normalize_section(line.section)
-        in_section = not (wanted_section and row_section) or row_section == wanted_section
-        hint += SECTION_BONUS if (wanted_section and row_section and in_section) else 0.0
-        if line.tag:
-            if not _tag_fits(line.tag, voice):
-                hint += WRONG_VOICE_TAG
-            elif in_section:
-                hint += VOICE_TAG_BONUS
-            # A row tagged for this part but written under a different section is
-            # some other repeat's harmony line. It is still eligible - a section
-            # marker can be missing or sit a system away - but its part tag must
-            # not out-argue a row that is in the right place. This is what let a
-            # voice singing Chorus 1 take the harmony row written under Ch3.
-        if after is not None and number == after + 1 and offset == 0:
-            hint += CONTINUES_BONUS
+            # A doubling part sings the lead's line with words left out - the score
+            # prints 'faith I move a moun-tain.' where the lead sings 'faith I can
+            # move a moun-tain.'. Read straight through, the written row disagrees
+            # from the first omission onwards and every syllable after it lands a note
+            # early. Read as a subsequence, each word the part does sing takes the box
+            # locked to it and the box for the word it does not sing is passed over,
+            # which is what the hand-made scores do. The two readings are compared on
+            # what they are worth, not on how far they reach: reading straight through
+            # always reaches further, and that is exactly the mistake.
+            skipped = _subsequence(line, wanted, run)
+            if skipped is not None:
+                boxes, agreed = skipped
+                worth = hits - MISMATCH_COST * (span - hits)
+                # Only a reading where every word this part sings really is the word
+                # written in the box it takes, and which accounts for most of the
+                # line, is a doubling. A loose fit that agrees here and there is just
+                # a wrong row found a different way.
+                exact = agreed >= len(boxes) - 1e-9 and len(boxes) >= SUBSEQUENCE_MINIMUM
+                if exact and len(boxes) >= SUBSEQUENCE_SHARE * span and agreed > worth:
+                    places, hits = boxes, agreed
+                    span = len(places)
 
-        # A line that wraps at the end of a system leaves a fragment - sometimes a
-        # single note - and one word is not enough to say which written line it
-        # opens. 'I' opens both 'I can clearly see' and 'I will not let my hands
-        # drop down'. What settles it is what this voice sings *next*: if this
-        # written line carries on past what the fragment takes, the rest of it
-        # should be the opening of the next line on the staff. Only considered
-        # where the written line does continue, so a line this staff finishes has
-        # nothing to prove.
-        if following and offset + span < len(line.keys):
-            rest = line.keys[offset + span:offset + span + len(following)]
-            if rest:
-                agreed = sum(
-                    _agrees(written, sung) for written, sung in zip(rest, following)
-                ) / len(rest)
-                hint += CONTINUATION_BONUS * agreed
+            if hits / span < MIN_AGREEMENT:
+                continue
 
-        # The layout is written in the order the song is performed, so a voice
-        # reads it forwards. The nearest stretch it has not sung yet is the one
-        # it is singing now - and that, not the words, is what tells eleven
-        # identical lines of English apart when two are translated differently.
-        # It is a preference rather than a rule, so a part that enters late or a
-        # line the layout leaves out cannot strand everything after it.
-        ahead = lock.flat(number, offset) - floor
-        hint += FORWARD_BONUS - AHEAD_COST * ahead if ahead >= 0 else BACKWARD_COST
+            # How much of the English this stretch actually accounts for decides it.
+            # The labels below only separate stretches that agree equally well - which
+            # is exactly the case they exist for: two written lines carrying the same
+            # English and different words, one for the lead and one for the harmony.
+            hint = 0.0
+            # Whether this written row belongs to the part of the song being sung.
+            # Unlabelled either side means "no opinion", not "disagrees".
+            row_section = normalize_section(line.section)
+            in_section = not (wanted_section and row_section) or row_section == wanted_section
+            hint += SECTION_BONUS if (wanted_section and row_section and in_section) else 0.0
+            if line.tag:
+                if not _tag_fits(line.tag, voice):
+                    hint += WRONG_VOICE_TAG
+                elif in_section:
+                    hint += VOICE_TAG_BONUS
+                # A row tagged for this part but written under a different section is
+                # some other repeat's harmony line. It is still eligible - a section
+                # marker can be missing or sit a system away - but its part tag must
+                # not out-argue a row that is in the right place. This is what let a
+                # voice singing Chorus 1 take the harmony row written under Ch3.
+            if printed and not own_row:
+                hint += PUNCTUATION_AGREES * _stops_agree(line, places, printed)
 
-        key = (round(hits - MISMATCH_COST * (span - hits), 6), hint)
-        if best_key is None or key > best_key:
-            best, best_key = (number, places), key
-    return best
+            if after is not None and number == after + 1 and offset == 0:
+                hint += CONTINUES_BONUS
+
+            # A line that wraps at the end of a system leaves a fragment - sometimes a
+            # single note - and one word is not enough to say which written line it
+            # opens. 'I' opens both 'I can clearly see' and 'I will not let my hands
+            # drop down'. What settles it is what this voice sings *next*: if this
+            # written line carries on past what the fragment takes, the rest of it
+            # should be the opening of the next line on the staff. Only considered
+            # where the written line does continue, so a line this staff finishes has
+            # nothing to prove.
+            if following and offset + span < len(line.keys):
+                rest = line.keys[offset + span:offset + span + len(following)]
+                if rest:
+                    agreed = sum(
+                        _agrees(written, sung) for written, sung in zip(rest, following)
+                    ) / len(rest)
+                    hint += CONTINUATION_BONUS * agreed
+
+            # The layout is written in the order the song is performed, so a voice
+            # reads it forwards. The nearest stretch it has not sung yet is the one
+            # it is singing now - and that, not the words, is what tells eleven
+            # identical lines of English apart when two are translated differently.
+            # It is a preference rather than a rule, so a part that enters late or a
+            # line the layout leaves out cannot strand everything after it.
+            ahead = lock.flat(number, offset) - floor
+            hint += FORWARD_BONUS - AHEAD_COST * ahead if ahead >= 0 else BACKWARD_COST
+
+            key = (round(hits - MISMATCH_COST * (span - hits), 6), hint)
+            if best_key is None or key > best_key:
+                best, best_key = (number, places), key
+        return best
+
+    # Respect the part tags first. Only if that leaves the notes with nothing at
+    # all does the same search run again with the tags relaxed, so a row written
+    # for another part is used rather than leaving the voice silent.
+    return search(False) or search(True)
 
 
 def _subsequence(line: LockLine, wanted: list[str], run: list[int]):
@@ -404,6 +489,7 @@ def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=Non
     Returns (tokens, written line ids, held syllables, cursor, where it left off).
     """
     wanted = [fold(anchor.text) for anchor in score_line.anchors]
+    printed = [anchor.text for anchor in score_line.anchors]
     ahead_words = (
         [fold(anchor.text) for anchor in following.anchors[:LOOKAHEAD_WORDS]]
         if following is not None else []
@@ -416,10 +502,13 @@ def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=Non
     after: int | None = None
     ends_at = previous
     floor = cursor
+    # (anchor index, syllable) for syllables the translation sings on notes the
+    # English holds a vowel across, found in the middle of a written row.
+    mid_held: list[tuple[int, str]] = []
 
     while len(tokens) < need:
         found = _segment(lock, wanted[len(tokens):], score_line.section, voice,
-                         after, floor, ahead_words)
+                         after, floor, ahead_words, printed[len(tokens):])
         if found is None:
             tokens.append("")
             ends_at = None
@@ -433,6 +522,20 @@ def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=Non
             continue
         offset = places[0]
         for index, position in enumerate(places):
+            # A box passed over inside this stretch is one of two different
+            # things. If the English box has a word in it, this part simply does
+            # not sing that word - a doubling voice reading the lead's line - and
+            # the box is rightly left behind. If the English box is blank, it is a
+            # note the English holds a vowel across: the score prints no syllable
+            # there for the translation to replace, but the translation has
+            # written one, and it belongs on that held note rather than nowhere.
+            if index > 0:
+                for skipped in range(places[index - 1] + 1, position):
+                    if line.keys[skipped]:
+                        continue
+                    extra = (line.translated[skipped] or "").strip()
+                    if extra and extra != BLANK_BOX and tokens:
+                        mid_held.append((len(tokens) - 1, extra))
             token = line.translated[position]
             if index == 0 and offset > 0 and ends_at != (line.id, offset - 1):
                 plain = token
@@ -461,12 +564,21 @@ def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=Non
     # Anything the translation sings that the English prints no syllable for goes
     # on the notes the English holds, in the order it was written.
     held: list[tuple] = []
+    taken: set[float] = set()
+    for anchor_index, extra in mid_held:
+        free = [x for x in score_line.held_after(anchor_index) if x not in taken]
+        if free:
+            held.append((free[0], extra))
+            taken.add(free[0])
     if last is not None and last.spare and need:
         spare = list(last.spare)
         for position in score_line.held_after(need - 1):
             if not spare:
                 break
+            if position in taken:
+                continue
             held.append((position, spare.pop(0)))
+            taken.add(position)
     return tokens, used, held, floor, ends_at
 
 

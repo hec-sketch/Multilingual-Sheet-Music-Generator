@@ -1,32 +1,171 @@
 <!doctype html>
 <html><head><meta charset="utf-8"><style>
-html,body{margin:0;padding:0;background:transparent;overflow:hidden;font-family:system-ui,sans-serif}
-#wrap{position:relative;display:inline-block;max-width:100%}
+html,body{margin:0;padding:0;background:transparent;font-family:system-ui,sans-serif}
+#wrap{position:relative;display:block;width:100%}
 #img{display:block;width:100%;height:auto}
-.hot{position:absolute;box-sizing:border-box;border:1.5px solid transparent;border-radius:4px;background:rgba(255,255,255,0.01);cursor:pointer}
+.hot{position:absolute;box-sizing:border-box;border:1.5px solid transparent;border-radius:4px;background:rgba(255,255,255,0.01);cursor:text;padding:0}
 .hot:hover{border-color:rgba(47,61,75,.65);background:rgba(255,255,255,.18)}
-.hot.selected{border-color:#2f3d4b;background:rgba(169,179,156,.25);box-shadow:0 0 0 2px rgba(169,179,156,.28)}
-.tip{position:fixed;left:8px;bottom:8px;padding:4px 8px;background:rgba(247,247,242,.95);border:1px solid #a9b39c;border-radius:6px;font-size:12px;color:#2f3d4b;pointer-events:none}
+.hot.selected{border-color:#2f3d4b;background:rgba(169,179,156,.25)}
+#editor{position:absolute;display:none;box-sizing:border-box;text-align:center;
+  border:1.5px solid #2f3d4b;border-radius:3px;background:#fffef7;color:#2f3d4b;
+  font-family:"Liberation Serif",Georgia,serif;padding:0 2px;outline:none;
+  box-shadow:0 1px 6px rgba(47,61,75,.28)}
+#tools{position:absolute;display:none;gap:2px;background:#2f3d4b;border-radius:4px;padding:2px}
+#tools button{border:0;background:transparent;color:#f7f7f2;font-size:11px;line-height:1;
+  padding:3px 5px;cursor:pointer;border-radius:3px;font-family:system-ui,sans-serif}
+#tools button:hover{background:rgba(255,255,255,.18)}
+.tip{position:absolute;left:6px;top:6px;padding:3px 7px;background:rgba(247,247,242,.92);
+  border:1px solid #a9b39c;border-radius:6px;font-size:11px;color:#2f3d4b;pointer-events:none}
 </style></head><body>
-<div id="wrap"><img id="img"><div id="hotspots"></div><div class="tip">Click a syllable to select it</div></div>
+<div id="wrap">
+  <img id="img" alt="">
+  <div id="hotspots"></div>
+  <input id="editor" spellcheck="false" autocomplete="off">
+  <div id="tools">
+    <button type="button" data-move="-1" title="Move left 1pt">◀</button>
+    <button type="button" data-move="1" title="Move right 1pt">▶</button>
+    <button type="button" data-move="-5" title="Move left 5pt">◀◀</button>
+    <button type="button" data-move="5" title="Move right 5pt">▶▶</button>
+    <button type="button" data-done="1" title="Keep as it is">leave as is</button>
+  </div>
+  <div class="tip">Click a syllable to type over it</div>
+</div>
 <script>
-function send(type,value){window.parent.postMessage({isStreamlitMessage:true,type,value},'*')}
-function ready(){window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:componentReady',apiVersion:1},'*')}
-function height(){window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:setFrameHeight',height:document.body.scrollHeight},'*')}
-function render(args){
- const img=document.getElementById('img'); const wrap=document.getElementById('wrap'); const hs=document.getElementById('hotspots');
- img.src='data:image/png;base64,'+args.image; wrap.style.width=(args.width||1000)+'px'; hs.innerHTML='';
- const scale=1; const hotspots=args.hotspots||[];
- hotspots.forEach(h=>{
-   const b=document.createElement('button'); b.className='hot'+(args.selected===h.key?' selected':''); b.title=h.label;
-   const w=Math.max(28, Math.min(70, (h.label||'').length*7+18)); const hh=28;
-   b.style.left=(h.x*args.zoom||h.x*1.0)-w/2+'px';
-   b.style.top=(h.y*args.zoom||h.y*1.0)-hh/2+'px'; b.style.width=w+'px'; b.style.height=hh+'px';
-   b.onclick=()=>send('streamlit:setComponentValue',{key:h.key,voice:h.voice,line_id:h.line_id,index:h.index,label:h.label});
-   hs.appendChild(b);
- });
- img.onload=height; setTimeout(height,30);
+// The page is drawn at `zoom` times its PDF size and the browser then scales
+// that image to whatever width the column gives us, so a hotspot has to follow
+// both. Reading the image's own clientWidth is what keeps a click on the picture
+// and a click on the hit area meaning the same syllable at any window size.
+//
+// Clicking a syllable opens an input sitting exactly on top of it, sized and
+// centred like the syllable it replaces, so what is being typed is visible in
+// place - the score is the form. Enter commits, Escape cancels.
+
+var ARGS = null, ACTIVE = null, SEQ = 0;
+
+function post(msg) {
+  window.parent.postMessage(Object.assign({isStreamlitMessage: true}, msg), "*");
 }
-window.addEventListener('message',e=>{const d=e.data||{};if(d.type==='streamlit:render')render(d.args||{});});
+function ready() { post({type: "streamlit:componentReady", apiVersion: 1}); }
+function height() {
+  post({type: "streamlit:setFrameHeight",
+        height: Math.ceil(document.documentElement.scrollHeight)});
+}
+function send(payload) {
+  SEQ += 1;
+  post({type: "streamlit:setComponentValue", dataType: "json",
+        value: Object.assign({seq: SEQ}, payload)});
+}
+
+function scale() {
+  var img = document.getElementById("img");
+  var natural = (ARGS && ARGS.width) || img.naturalWidth || 1;
+  return ((ARGS && ARGS.zoom) || 1) * ((img.clientWidth || natural) / natural);
+}
+
+function closeEditor(commit) {
+  var editor = document.getElementById("editor");
+  var tools = document.getElementById("tools");
+  var spot = ACTIVE;
+  editor.style.display = "none";
+  tools.style.display = "none";
+  ACTIVE = null;
+  if (!spot) return;
+  var text = editor.value.trim();
+  if (commit && text !== (spot.label === "(no syllable)" ? "" : spot.label)) {
+    send({key: spot.key, voice: spot.voice, line_id: spot.line_id,
+          index: spot.index, action: "edit", text: text});
+  }
+}
+
+function openEditor(spot, box) {
+  closeEditor(false);
+  ACTIVE = spot;
+  var editor = document.getElementById("editor");
+  var tools = document.getElementById("tools");
+  var k = scale();
+  var width = Math.max(34, parseFloat(box.style.width) + 14);
+  editor.value = spot.label === "(no syllable)" ? "" : spot.label;
+  editor.placeholder = spot.label === "(no syllable)" ? "no syllable" : "";
+  editor.style.fontSize = Math.max(9, 11 * k) + "px";
+  editor.style.height = Math.max(16, 20 * k) + "px";
+  editor.style.width = width + "px";
+  editor.style.left = (parseFloat(box.style.left) + parseFloat(box.style.width) / 2
+                       - width / 2) + "px";
+  editor.style.top = box.style.top;
+  editor.style.display = "block";
+  tools.style.left = editor.style.left;
+  tools.style.top = (parseFloat(box.style.top) + parseFloat(editor.style.height) + 3) + "px";
+  tools.style.display = "flex";
+  editor.focus();
+  editor.select();
+  send({key: spot.key, voice: spot.voice, line_id: spot.line_id,
+        index: spot.index, action: "select"});
+}
+
+function place() {
+  if (!ARGS) return;
+  var host = document.getElementById("hotspots");
+  var k = scale();
+  var baseline = (ARGS.baseline === undefined ? 5.6 : ARGS.baseline);
+  closeEditor(false);
+  host.innerHTML = "";
+  (ARGS.hotspots || []).forEach(function (h) {
+    var b = document.createElement("button");
+    b.className = "hot" + (ARGS.selected === h.key ? " selected" : "");
+    b.title = h.label;
+    b.type = "button";
+    var w = Math.max(16, Math.min(64, (String(h.label || "").length * 6 + 12) * k));
+    var hh = Math.max(14, 22 * k);
+    b.style.left = (h.x * k - w / 2) + "px";
+    b.style.top = ((h.y + baseline) * k - hh * 0.78) + "px";
+    b.style.width = w + "px";
+    b.style.height = hh + "px";
+    b.onclick = function () { openEditor(h, b); };
+    host.appendChild(b);
+  });
+  height();
+}
+
+document.getElementById("editor").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { e.preventDefault(); closeEditor(true); }
+  else if (e.key === "Escape") { e.preventDefault(); closeEditor(false); }
+});
+document.getElementById("editor").addEventListener("blur", function () {
+  // Losing focus to one of the nudge buttons must not close the editor.
+  setTimeout(function () {
+    if (!document.getElementById("tools").matches(":hover")) closeEditor(true);
+  }, 120);
+});
+document.getElementById("tools").addEventListener("click", function (e) {
+  var button = e.target.closest("button");
+  if (!button || !ACTIVE) return;
+  var spot = ACTIVE;
+  if (button.dataset.move) {
+    send({key: spot.key, voice: spot.voice, line_id: spot.line_id, index: spot.index,
+          action: "nudge", delta: parseFloat(button.dataset.move)});
+    closeEditor(false);
+  } else {
+    send({key: spot.key, voice: spot.voice, line_id: spot.line_id, index: spot.index,
+          action: "keep"});
+    closeEditor(false);
+  }
+});
+
+function render(args) {
+  ARGS = args || {};
+  var img = document.getElementById("img");
+  var src = "data:image/png;base64," + ARGS.image;
+  if (img.src !== src) { img.onload = place; img.src = src; }
+  if (img.complete) place();
+}
+
+window.addEventListener("message", function (e) {
+  var d = e.data || {};
+  if (d.type === "streamlit:render") render(d.args || {});
+});
+window.addEventListener("resize", place);
+if (window.ResizeObserver) {
+  new ResizeObserver(place).observe(document.getElementById("wrap"));
+}
 ready();
 </script></body></html>

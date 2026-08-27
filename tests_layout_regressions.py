@@ -40,7 +40,7 @@ def halves(song: str, variant: str):
         low = entry.lower()
         if low.startswith("english score"):
             score_pdf = os.path.join(folder, entry)
-        elif low.startswith("syllabus layout"):
+        elif low.replace(" ", "").startswith(("syllabuslayout", "syllablelayout")):
             layout_pdf = os.path.join(folder, entry)
     assert score_pdf and layout_pdf, f"{folder} is missing a score or a layout"
 
@@ -177,7 +177,7 @@ def plan_for(song: str, variant: str):
         low = entry.lower()
         if low.startswith("english score"):
             score_pdf = os.path.join(folder, entry)
-        elif low.startswith("syllabus layout"):
+        elif low.replace(" ", "").startswith(("syllabuslayout", "syllablelayout")):
             layout_pdf = os.path.join(folder, entry)
 
     score_doc = score_mod.parse_score(open(score_pdf, "rb").read())
@@ -309,3 +309,375 @@ def test_a_phrase_wrapping_at_the_end_of_a_staff_follows_what_comes_next():
             f"the staff ended with {assignment.tokens[-2:]!r}; the voice goes on to "
             "sing 'more than man y spar- rows,', so these notes carry 'Jee a-'"
         )
+
+
+# --------------------------------------------------------------------------- 9
+
+
+def _lock_from(rows):
+    """A small hand-built lock, for the shapes the corpus has no clean case of."""
+    lines = []
+    for row_id, section, tag, english, translated, classes in rows:
+        lines.append(
+            lock_mod.LockLine(
+                id=row_id,
+                section=section,
+                tag=tag,
+                english=list(english),
+                keys=[lock_mod.fold(word) for word in english],
+                translated=list(translated),
+                semantic=list(classes),
+            )
+        )
+    index, opens, running = {}, [], 0
+    for number, line in enumerate(lines):
+        opens.append(running)
+        running += len(line)
+        for position, key in enumerate(line.keys):
+            index.setdefault(key, []).append((number, position))
+    return lock_mod.Lock(lines=lines, index=index, opens=opens)
+
+
+# The shape both of these pin: a line the layout writes out once, marked for the
+# harmony that answers with it at the end of Chorus 1, which the lead also sings
+# at a later repeat the layout does not write again.
+SHARED_LINE = ["I", "will", "not", "let", "go."]
+SHARED_WORDS = ["Ma-", "ku", "ma-", "mi", "kanda."]
+
+
+def test_a_harmony_row_is_still_available_to_the_lead_elsewhere():
+    """A part tag says who sings the row here, not who may never sing the words.
+
+    A row marked '(Harmonies)' is kept from a lead while any other row can answer
+    for the same words - that is what stops an answering phrase being pulled into
+    the lead's line. But where the layout writes the line only once, refusing it
+    outright leaves the lead's notes silent, and a silent note is worse than a
+    row written for the part next door.
+    """
+    lock = _lock_from([
+        (1, "Ch1", "Harmonies", SHARED_LINE, SHARED_WORDS, [""] * 5),
+    ])
+    found = lock_mod._segment(lock, [lock_mod.fold(w) for w in SHARED_LINE],
+                              "Ch3", "Female Lead 1", None, 0)
+    assert found is not None, (
+        "the lead was refused the only written row carrying the line it sings, "
+        "so those notes are left with nothing on them"
+    )
+    assert found[0] == 0 and len(found[1]) == 5
+
+
+def test_a_yellow_harmony_box_is_still_available_to_the_lead_elsewhere():
+    """Same rule for the other way a layout marks a harmony: yellow cell fill.
+
+    Yellow boxes route word by word rather than row by row, so this one used to
+    bar the lead even more firmly - the row was never even offered as a place to
+    start.
+    """
+    lock = _lock_from([
+        (1, "Ch1", "", SHARED_LINE, SHARED_WORDS, ["harmony"] * 5),
+    ])
+    found = lock_mod._segment(lock, [lock_mod.fold(w) for w in SHARED_LINE],
+                              "Ch3", "Female Lead 1", None, 0)
+    assert found is not None, (
+        "the lead was refused every box of the only row carrying its line"
+    )
+    assert found[0] == 0 and len(found[1]) == 5
+
+
+def test_the_tag_still_wins_when_another_row_can_answer():
+    """The relaxation is a last resort, not a softening of the rule.
+
+    With an untagged row carrying the same English, the lead must take that one
+    and leave the harmony's row alone. This is the case the tags exist for, and
+    the fallback must not touch it.
+    """
+    lock = _lock_from([
+        (1, "Ch1", "Harmonies", SHARED_LINE, ["A-", "a", "a-", "a", "aa."], [""] * 5),
+        (2, "Ch3", "", SHARED_LINE, SHARED_WORDS, [""] * 5),
+    ])
+    found = lock_mod._segment(lock, [lock_mod.fold(w) for w in SHARED_LINE],
+                              "Ch3", "Female Lead 1", None, 0)
+    assert found is not None and found[0] == 1, (
+        "the lead took the harmony's row while its own was available"
+    )
+
+
+# --------------------------------------------------------------------------- 10
+
+
+def test_a_row_the_two_languages_disagree_about_is_marked_for_attention():
+    """A count disagreement between the halves colours the whole score line.
+
+    Where the translated row does not take the same number of notes as the
+    English one it is locked to - and blank boxes cannot account for the
+    difference - the pairing reports 'count'. Nothing downstream can tell which
+    of those syllables is the one that slipped, so every syllable of every score
+    line drawn from that row is marked, not just the ones that came out empty.
+
+    This pins behaviour that already worked; it had never been exercised, because
+    no case in the corpus produces a 'count' pair.
+    """
+    from smgcore.align import Assignment
+
+    assignment = Assignment(
+        score_line_id=7, voice="Female Lead 1", page=0, section="Ch1",
+        english="I will not let go.", tokens=["Ma-", "ku", "ma-", "mi", "kanda."],
+        layout_line_ids=[3], status="ok", note="",
+    )
+    settled = lock_mod.attention_marks(assignment, assignment.tokens, set(), set())
+    assert not any(settled), (
+        f"a line nothing is wrong with was marked: {settled!r}"
+    )
+    marked = lock_mod.attention_marks(assignment, assignment.tokens, set(), {3})
+    assert marked == [lock_mod.ATTENTION] * 5, (
+        f"the row the halves disagree about was marked {marked!r}; every syllable "
+        "on it needs an eye, because the disagreement does not say which one moved"
+    )
+    settled_one = lock_mod.attention_marks(assignment, assignment.tokens, {(7, 2)}, {3})
+    assert settled_one[2] == lock_mod.RESOLVED and settled_one[0] == lock_mod.ATTENTION, (
+        "a syllable somebody has settled must stop being red while the rest of the "
+        f"line stays red; got {settled_one!r}"
+    )
+
+
+# --------------------------------------------------------------------------- 11
+
+
+def test_a_syllable_written_against_a_cell_border_stays_in_its_own_box():
+    """Two boxes are two notes, even when the PDF hands them back as one word.
+
+    A translator writing `p'un-` in one box and `chay` in the next leaves no gap
+    at the border, so the PDF's text extraction returns the single word
+    `p'un-chay` with a bounding box straddling both cells. Read as one word it
+    lands wholly in whichever cell holds its centre: two syllables are squeezed
+    onto one note, the other cell is read as a blank - a held note - and every
+    syllable after it in the row lands a note early. Where the centre falls on
+    the border itself, both cells used to claim it and the syllable was printed
+    twice running.
+
+    Rise Again / QUB writes its Pre-Ch3 line this way throughout.
+    """
+    _, translated = halves("Rise Again", "QUB")
+    rows = [line for line in translated if line.section == "Pre-Ch3"]
+    assert rows, "Rise Again / QUB has no Pre-Ch3 row in its translated half"
+    row = text_of(rows[0])
+    assert row == "Uj p'un- chay wa- ñus- qas kau- sa- ren- qan- ku,", (
+        f"the Pre-Ch3 row was read as {row!r}; the layout writes it "
+        "'Uj | p'un- | chay | wa- | ñus- | qas | kau- | sa- | ren- | qan- | ku,', "
+        "one syllable per box"
+    )
+
+
+def test_a_word_that_merely_overhangs_its_cell_is_not_cut_up():
+    """Only a hyphen at the border is evidence of two boxes, not a wide word.
+
+    Characters are not evenly spaced in a proportional font, so where the border
+    falls inside a word can only be estimated. A cut made on that estimate alone
+    invents a syllable and costs the whole row: Hands Drop Down / AP writes
+    'yan' and 'chʼa-' in their own boxes, and splitting either of them puts an
+    extra note's worth of text into the line.
+    """
+    _, translated = halves("Hands Drop Down", "AP")
+    words = [token for line in translated for token in line.tokens]
+    assert "yan" in words, "'yan' is not read as a syllable of its own"
+    for fragment in ("ya", "n"):
+        assert fragment not in words, (
+            f"{fragment!r} appears as a syllable of its own; a word was cut at a "
+            "cell border that runs through it rather than between two boxes"
+        )
+
+
+# --------------------------------------------------------------------------- 12
+
+
+def test_a_syllable_written_where_the_english_is_blank_goes_on_the_held_note():
+    """A blank English box is a note, and the translation may sing on it.
+
+    Rise Again / QUB writes its pre-chorus as
+
+        The | hour |  -   | is  | com- | ing
+        Uj  | p'un-| chay | wa- | ñus- | qas
+
+    The English holds 'hour' across the third box, so the engraving prints no
+    syllable there for 'chay' to replace. Reading the row as a subsequence - the
+    machinery that lets a doubling voice pass over a word it does not sing -
+    passed that box over too, and 'chay' was dropped from the score entirely.
+    The two cases look alike and are not: a box the English leaves blank is a
+    note the voice does sing, and its syllable belongs on the note the English
+    holds.
+    """
+    _, plans = plan_for("Rise Again", "QUB")
+    lines = [
+        assignment
+        for plan in plans.values()
+        for assignment in plan.assignments
+        if assignment.english.split()[:4] == ["The", "hour", "is", "com"]
+    ]
+    assert lines, "no staff sings 'The hour is com ing when'"
+    for assignment in lines:
+        assert assignment.tokens[:2] == ["Uj", "p'un-"], (
+            f"the line opens {assignment.tokens[:2]!r}, not on 'Uj p'un-'"
+        )
+        carried = [text for _, text in assignment.held]
+        assert "chay" in carried, (
+            f"'chay' was left off the score; the line carries {carried!r} on its "
+            "held notes"
+        )
+
+
+# --------------------------------------------------------------------------- 13
+
+
+def test_the_printed_punctuation_says_which_repeat_is_being_sung():
+    """A line repeated with a different stop is a different written row.
+
+    Trust in you / QUB writes 'I trust in you.' twice in the chorus and
+    'I trust in you!' at the end of the song. The words are identical once
+    folded for comparison, so the closing line was taking a chorus row and the
+    voice sang the chorus's syllables at the end of the song. The engraving
+    prints 'you!' there, and exactly one written row prints 'you!' too.
+    """
+    _, plans = plan_for("Trust in you", "QUB")
+    closing = [
+        assignment
+        for plan in plans.values()
+        for assignment in plan.assignments
+        if assignment.english.strip() == "you! I trust in you!"
+    ]
+    assert closing, "the score does not end on 'you! I trust in you!'"
+    for assignment in closing:
+        assert assignment.tokens[1:] == ["wi-", "ñay-", "paj-", "min."], (
+            f"the closing line was given {assignment.tokens!r}; the engraving "
+            "prints 'you!', and the row written 'trust in you!' reads "
+            "'wi- ñay- paj- min.'"
+        )
+
+
+def test_punctuation_does_not_pull_a_voice_off_its_own_part():
+    """Which part a row is written for outranks how it is punctuated.
+
+    Hands Drop Down / QUB leaves the full stop off its '(Harmonies)' rows as a
+    typing habit while the engraving prints it. Reading punctuation as evidence
+    without ranking it below the part tag walked three harmony staves off their
+    own rows and onto an untagged one, changing the syllables they sing.
+    """
+    _, plans = plan_for("Hands Drop Down", "QUB")
+    lines = [
+        assignment
+        for voice, plan in plans.items() if "Harmony" in voice
+        for assignment in plan.assignments
+        if assignment.english.startswith("clear ly see")
+        and "hands drop down" in assignment.english
+    ]
+    assert lines, "no harmony staff carries 'clear ly see ... hands drop down'"
+    for assignment in lines:
+        assert assignment.tokens[-2:] == ["a-", "ri."], (
+            f"a harmony staff was given {assignment.tokens[-2:]!r}; its own "
+            "'(Harmonies)' row reads 'a- ri.', and the missing full stop on that "
+            "row is not evidence against it"
+        )
+
+
+# --------------------------------------------------------------------------- 14
+
+
+def test_taking_the_lyrics_out_does_not_take_noteheads_with_them():
+    """Removing the English lyrics must leave every mark of the music behind.
+
+    The no-lyrics score used to be made by redacting each lyric's rectangle, and
+    redaction deletes any glyph whose box merely *touches* the area cleared. In
+    an engraved score the lyric sits directly under the staff, so noteheads,
+    stems, ties and rests went with it - between one and four hundred music
+    glyphs per file, on every score in the corpus.
+    """
+    import collections
+
+    import pymupdf as fitz
+
+    from smgcore import blankscore, score as score_module
+
+    folder = os.path.join(_test_data(), "Rise Again", "QUB")
+    name = next(e for e in os.listdir(folder) if e.lower().startswith("english score"))
+    original = open(os.path.join(folder, name), "rb").read()
+    score_doc = score_module.parse_score(original)
+    blank, removed = blankscore.strip_lyrics(original, score_doc)
+    assert removed, "no lyrics were removed at all"
+
+    def glyphs(data: bytes) -> collections.Counter:
+        counts: collections.Counter = collections.Counter()
+        for page in fitz.open(stream=data, filetype="pdf"):
+            for block in page.get_text("dict")["blocks"]:
+                for line in block.get("lines", []):
+                    for span in line["spans"]:
+                        counts[span["font"].split("+")[-1]] += len(span["text"].strip())
+        return counts
+
+    before, after = glyphs(original), glyphs(blank)
+    lyric_font = score_doc.lyric_font[0]
+    lost = {
+        font: before[font] - after[font]
+        for font in before
+        if font != lyric_font and before[font] != after[font]
+    }
+    assert not lost, f"the music lost glyphs when the lyrics were taken out: {lost}"
+    assert after[lyric_font] < before[lyric_font], "no lyric glyphs were removed"
+
+
+# --------------------------------------------------------------------------- 15
+
+
+def test_a_line_is_set_at_one_size_and_nothing_collides():
+    """One size per lyric line, chosen so that no two syllables touch.
+
+    Each syllable used to be sized against the room between its neighbours,
+    which measures the wrong thing twice: it is drawn centred on its own note,
+    which is not the middle of that room, and the neighbour's own width is never
+    counted. So syllables came out at visibly different sizes along one line -
+    the long ones tiny - and still ran into each other. We Go Preaching / WY
+    printed "shua'a" and "waa'in." 7.4pt on top of one another.
+    """
+    import collections
+
+    import pymupdf as fitz
+
+    from smgcore import blankscore, lock as lock_module, render as render_module
+
+    score_doc, plans = plan_for("We Go Preaching", "WY")
+    folder = os.path.join(_test_data(), "We Go Preaching", "WY")
+    name = next(e for e in os.listdir(folder) if e.lower().startswith("english score"))
+    blank, _ = blankscore.strip_lyrics(open(os.path.join(folder, name), "rb").read(),
+                                       score_doc)
+    placements = {
+        assignment.score_line_id: assignment.tokens
+        for plan in plans.values() for assignment in plan.assignments
+    }
+    held = {
+        assignment.score_line_id: assignment.held
+        for plan in plans.values() for assignment in plan.assignments
+        if assignment.held
+    }
+    pdf = render_module.render(score_doc, blank, placements,
+                               render_module.RenderSettings(), held=held)
+
+    rows = collections.defaultdict(list)
+    for page in fitz.open(stream=pdf, filetype="pdf"):
+        for block in page.get_text("dict")["blocks"]:
+            for line in block.get("lines", []):
+                for span in line["spans"]:
+                    if span["font"] != "LiberationSerif":
+                        continue
+                    rows[(page.number, round(span["origin"][1], 1))].append(
+                        (span["bbox"][0], span["bbox"][2], span["text"], span["size"])
+                    )
+    assert rows, "the render produced no syllables at all"
+
+    collisions = []
+    for key, items in rows.items():
+        items.sort()
+        for left, right in zip(items, items[1:]):
+            if right[0] - left[1] < -0.3:
+                collisions.append((left[2], right[2], round(left[1] - right[0], 1)))
+    assert not collisions, (
+        f"{len(collisions)} pair(s) of syllables run into each other, worst by "
+        f"{max(c[2] for c in collisions)}pt: {collisions[:3]}"
+    )

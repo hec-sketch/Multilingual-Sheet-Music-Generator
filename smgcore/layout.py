@@ -520,6 +520,63 @@ def _rows_by_band(rows: list[list[tuple]], bands: list[list[fitz.Rect]]):
     return out_rows, out_bands
 
 
+
+def _split_words_across_cells(row: list[tuple], boxes: list[fitz.Rect]) -> list[tuple]:
+    """Cut a word that was typed straight through a cell border.
+
+    A translator writing `p'un-` in one box and `chay` in the next leaves no gap
+    at the border, so the PDF hands the two back as the single word `p'un-chay`
+    with a bounding box straddling both cells. Read as one word it lands wholly
+    in whichever cell holds its centre - printing two syllables squeezed onto one
+    note and leaving the other cell blank, which the rest of the app then reads
+    as a held note and every syllable after it goes a note early. Worse, a word
+    centred exactly on the shared border used to be claimed by both cells and
+    printed twice.
+
+    The cell borders decide where to cut. Characters are placed evenly across the
+    word's own width, which is what a monospaced layout font gives, and the cut
+    is moved onto a hyphen when one is next to it - the hyphen belongs to the
+    syllable before the break, as the layout wrote it.
+    """
+    if not row or len(boxes) < 2:
+        return row
+    edges = sorted({rect.x0 for rect in boxes} | {rect.x1 for rect in boxes})
+    out: list[tuple] = []
+    for word in row:
+        y0, x0, x1, raw = word
+        width = x1 - x0
+        cuts = [e for e in edges if x0 + 1.0 < e < x1 - 1.0]
+        if not cuts or width <= 0 or len(raw) < 2:
+            out.append(word)
+            continue
+        pieces, start_char, start_x = [], 0, x0
+        for edge in cuts:
+            # Where the border falls in the word, if characters were evenly
+            # spaced. That is only a guess - a proportional font spaces them
+            # anything but evenly - so it is never trusted on its own.
+            guess = max(1, min(len(raw) - 1, round((edge - x0) / width * len(raw))))
+            # It is trusted only when it lands on a hyphen, which is the whole
+            # case this exists for: a hyphenated syllable written up against the
+            # border of the next box. Anything else - a word merely overhanging
+            # its cell, a title crossing the grid - is left alone, because a
+            # wrong cut invents a syllable and costs a whole row.
+            end_char = None
+            for candidate in (guess, guess - 1, guess + 1):
+                if 0 < candidate < len(raw) and raw[candidate - 1] == "-":
+                    end_char = candidate
+                    break
+            if end_char is None or end_char <= start_char:
+                continue
+            pieces.append((y0, start_x, edge, raw[start_char:end_char]))
+            start_char, start_x = end_char, edge
+        if not pieces:
+            out.append(word)
+            continue
+        pieces.append((y0, start_x, x1, raw[start_char:]))
+        out.extend([piece for piece in pieces if piece[3]])
+    return out
+
+
 def _grid_tokens_for_row(
     row: list[tuple],
     boxes: list[fitz.Rect],
@@ -534,17 +591,31 @@ def _grid_tokens_for_row(
     if not boxes:
         return []
 
+    row = _split_words_across_cells(row, boxes)
+
+    # Each word belongs to exactly one cell. Collecting per cell "every word whose
+    # centre is inside me" double-counts a word centred on the border two cells
+    # share, which printed the same syllable on two notes running.
+    claim: dict[int, list] = {}
+    for w in row:
+        y0, x0, x1, raw = w
+        wcx = (x0 + x1) / 2.0
+        wcy = y0 + 5.0
+        best, best_gap = None, None
+        for index, rect in enumerate(boxes):
+            if not (rect.y0 - 1.5 <= wcy <= rect.y1 + 1.5):
+                continue
+            if not (rect.x0 - 0.5 <= wcx <= rect.x1 + 0.5):
+                continue
+            gap = abs(wcx - (rect.x0 + rect.x1) / 2.0)
+            if best_gap is None or gap < best_gap:
+                best, best_gap = index, gap
+        if best is not None:
+            claim.setdefault(best, []).append(w)
+
     tokens: list[Token] = []
-    for rect in boxes:
-        inside = []
-        for w in row:
-            y0, x0, x1, raw = w
-            # Word center must actually be inside the cell.
-            wcx = (x0 + x1) / 2.0
-            wcy = y0 + 5.0
-            if rect.x0 - 0.5 <= wcx <= rect.x1 + 0.5 and rect.y0 - 1.5 <= wcy <= rect.y1 + 1.5:
-                inside.append(w)
-        inside.sort(key=lambda v: v[1])
+    for rect_index, rect in enumerate(boxes):
+        inside = sorted(claim.get(rect_index, []), key=lambda v: v[1])
 
         semantic = ""
         if color_boxes:

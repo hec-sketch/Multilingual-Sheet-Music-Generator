@@ -328,6 +328,7 @@ def seed_state() -> None:
         ("nudge_edits", {}),
         ("preview_edit_text", {}),
         ("preview_flags", {}),
+        ("preview_seq", None),
         ("preview_selected", None),
         ("skip_voices", []),
         ("dropped_layout", set()),
@@ -355,7 +356,8 @@ def build_assignment_anchor_map(score_doc, plans):
             ]
     return out
 
-def selected_preview_value(result_pdf: bytes, page_number: int, hotspots: list[dict], selected_key: str | None = None):
+def selected_preview_value(result_pdf: bytes, page_number: int, hotspots: list[dict],
+                           selected_key: str | None = None, baseline: float = 5.6):
     """Render the final PDF page as a clickable image and return the clicked hotspot.
 
     The component is deliberately used only in Step 5: the image shown is the actual
@@ -374,6 +376,7 @@ def selected_preview_value(result_pdf: bytes, page_number: int, hotspots: list[d
         height=pix.height,
         hotspots=hotspots,
         zoom=zoom,
+        baseline=float(baseline),
         selected=selected_key,
         key=f"clickable_preview_{page_number}",
         default=None,
@@ -1435,6 +1438,10 @@ if step == 5:
                 if assignment.page + 1 != int(page_pick):
                     continue
                 tokens = edited_tokens(voice_name, assignment)
+                # The syllable is drawn at the anchor plus whatever it has been
+                # nudged by, so the hit area has to move with it - otherwise the
+                # second nudge selects the syllable next door.
+                shifts = edited_nudges(voice_name, assignment, len(tokens))
                 for idx, anchor in enumerate(assignment_anchor_map.get((voice_name, assignment.score_line_id), [])):
                     if idx >= len(tokens):
                         break
@@ -1447,7 +1454,7 @@ if step == 5:
                     key = f"{voice_name}||{assignment.score_line_id}||{idx}"
                     visible_hotspots.append({
                         "key": key,
-                        "x": float(anchor.get("x", 0)),
+                        "x": float(anchor.get("x", 0)) + (shifts[idx] if idx < len(shifts) else 0.0),
                         "y": float(anchor.get("y", assignment.page_y if hasattr(assignment, 'page_y') else 0)),
                         "label": label,
                         "voice": voice_name,
@@ -1456,82 +1463,49 @@ if step == 5:
                     })
 
         selected = selected_preview_value(proof, int(page_pick) - 1, visible_hotspots,
-                                           st.session_state.get("preview_selected"))
+                                           st.session_state.get("preview_selected"),
+                                           baseline)
+        # Corrections typed onto the score itself. The component sends one of
+        # these each time a syllable is committed, nudged, or deliberately left
+        # as it stands; `seq` counts them, so the same correction made twice is
+        # applied once and a rerun does not replay the last one.
         if selected and selected.get("key"):
             st.session_state["preview_selected"] = selected["key"]
-
-        # Selected syllable editor. This is the only correction UI needed after the score
-        # has been generated: text edits and nudge buttons immediately feed the renderer.
-        selected_key = st.session_state.get("preview_selected")
-        if selected_key:
-            try:
-                voice_name, line_id_s, idx_s = selected_key.split("||", 2)
-                line_id = int(line_id_s)
-                idx = int(idx_s)
-                assignment = next(a for a in plans[voice_name].assignments if a.score_line_id == line_id)
-                current_tokens = edited_tokens(voice_name, assignment)
-                current_text = current_tokens[idx] if idx < len(current_tokens) else ""
-                flag = st.session_state["preview_flags"].get(selected_key, "open")
-                with st.container(border=True):
-                    st.markdown(f"**Selected:** {current_text or '(blank)'} · {voice_name} · note {idx + 1}")
-                    c1, c2, c3, c4, c5 = st.columns([3, 1, 1, 1, 1])
-                    with c1:
-                        new_text = st.text_input("Syllable", value=current_text,
-                                                 key=f"preview_text_{selected_key}")
-                    with c2:
-                        if st.button("← 1", key=f"nudge_l1_{selected_key}"):
-                            vals = edited_nudges(voice_name, assignment, len(assignment.tokens))
-                            vals[idx] -= 1.0
-                            st.session_state["nudge_edits"][f"{voice_name}||{line_id}"] = " ".join(map(str, vals))
-                            st.session_state["preview_flags"][selected_key] = "resolved"
-                            st.rerun()
-                    with c3:
-                        if st.button("→ 1", key=f"nudge_r1_{selected_key}"):
-                            vals = edited_nudges(voice_name, assignment, len(assignment.tokens))
-                            vals[idx] += 1.0
-                            st.session_state["nudge_edits"][f"{voice_name}||{line_id}"] = " ".join(map(str, vals))
-                            st.session_state["preview_flags"][selected_key] = "resolved"
-                            st.rerun()
-                    with c4:
-                        if st.button("← 5", key=f"nudge_l5_{selected_key}"):
-                            vals = edited_nudges(voice_name, assignment, len(assignment.tokens))
-                            vals[idx] -= 5.0
-                            st.session_state["nudge_edits"][f"{voice_name}||{line_id}"] = " ".join(map(str, vals))
-                            st.session_state["preview_flags"][selected_key] = "resolved"
-                            st.rerun()
-                    with c5:
-                        if st.button("→ 5", key=f"nudge_r5_{selected_key}"):
-                            vals = edited_nudges(voice_name, assignment, len(assignment.tokens))
-                            vals[idx] += 5.0
-                            st.session_state["nudge_edits"][f"{voice_name}||{line_id}"] = " ".join(map(str, vals))
-                            st.session_state["preview_flags"][selected_key] = "resolved"
-                            st.rerun()
-                    c6, c7 = st.columns([1, 1])
-                    with c6:
-                        if st.button("Save correction", type="primary", key=f"save_preview_{selected_key}"):
-                            vals = list(current_tokens)
-                            vals[idx] = new_text.strip()
-                            st.session_state["assign_edits"][f"{voice_name}||{line_id}"] = " ".join(vals)
-                            st.session_state["preview_flags"][selected_key] = "resolved"
-                            st.rerun()
-                    with c7:
-                        label = "✓ Resolved" if flag == "resolved" else "! Needs review"
-                        if flag == "resolved":
-                            st.success(label)
-                        else:
-                            st.warning(label)
-                        if st.button("Clear selection", key=f"clear_preview_{selected_key}"):
-                            st.session_state["preview_selected"] = None
-                            st.rerun()
-            except (KeyError, StopIteration, ValueError):
-                st.session_state["preview_selected"] = None
-                st.warning("That preview selection is no longer available; please click the syllable again.")
+            action = selected.get("action")
+            seq = selected.get("seq")
+            if action in ("edit", "nudge", "keep") and seq != st.session_state.get("preview_seq"):
+                st.session_state["preview_seq"] = seq
+                try:
+                    voice_name = selected["voice"]
+                    line_id = int(selected["line_id"])
+                    index = int(selected["index"])
+                    assignment = next(a for a in plans[voice_name].assignments
+                                      if a.score_line_id == line_id)
+                    row = f"{voice_name}||{line_id}"
+                    if action == "edit":
+                        values = edited_tokens(voice_name, assignment)
+                        while len(values) <= index:
+                            values.append("")
+                        values[index] = selected.get("text", "").strip()
+                        st.session_state["assign_edits"][row] = " ".join(values)
+                    elif action == "nudge":
+                        values = edited_nudges(voice_name, assignment, len(assignment.tokens))
+                        values[index] += float(selected.get("delta") or 0.0)
+                        st.session_state["nudge_edits"][row] = " ".join(map(str, values))
+                    # "keep" settles the note without changing it: the person has
+                    # looked at it and is happy, which is exactly what the green
+                    # is for. Every action marks it settled.
+                    st.session_state["preview_flags"][selected["key"]] = "resolved"
+                    st.rerun()
+                except (KeyError, StopIteration, ValueError, TypeError):
+                    pass
 
         st.caption(
             "**Red** is a note the app was unsure about — a gap it could not fill, or a "
-            "line it only partly recognised. Click it to retype the syllable or nudge it "
-            "sideways, and it turns **green**. Anything you look at and decide to leave "
-            "as it stands keeps its red, so you can always tell what you have been "
-            "through from what you have not. The colour is only here on screen — the "
-            "downloaded score is plain black."
+            "line it only partly recognised. Click any syllable to type over it where it "
+            "sits: Enter keeps what you typed, Escape leaves it alone, and the small bar "
+            "underneath moves it sideways or marks it read. A note you have settled turns "
+            "**green**; one you have not looked at keeps its red, so you can always tell "
+            "what you have been through from what you have not. The colour is only here on "
+            "screen — the downloaded score is plain black."
         )

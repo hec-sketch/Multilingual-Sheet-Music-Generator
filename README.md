@@ -24,7 +24,10 @@ saves a correction later.
 
 ### One box, one note
 
-A drawn cell is a note. A cell holding only `-`, or nothing at all, is still a
+A drawn cell is a note. Two syllables written in two boxes stay two notes even
+when they are typed hard up against the border between them - `p'un-` `chay` with
+no gap comes out of the PDF as the single word `p'un-chay`, and the app cuts it
+back apart at the hyphen. A cell holding only `-`, or nothing at all, is still a
 note — one the previous syllable is held across. Those cells must be drawn, not
 left out, or every syllable after them lands a note early.
 
@@ -48,6 +51,14 @@ singer seeing the word they are singing and seeing a fragment of it. It is also
 the single largest source of disagreement between the app's output and a
 hand-made score — about thirty rows across the ten reference songs, every one of
 them a document written before this rule was settled.
+
+### Punctuation is read, so a repeat must be punctuated as it is engraved
+
+Where a line is written out more than once and translated differently each time,
+the full stop that ends the row is what tells the repeats apart: `trust in you.`
+in the chorus against `trust in you!` at the end of the song. Write the stop the
+score prints. A row that leaves it off is not held against the part it belongs
+to, but it gives the app one less thing to go on.
 
 ### The two halves must be the same song, written twice
 
@@ -101,10 +112,16 @@ Things it handles that are easy to get wrong:
 - **A chorus written out once per repeat**, with a line or two translated
   differently each time. A part tag only argues for a row that is in the right
   part of the song.
-- **Blank and dash cells**, in either language, as real notes.
+- **Blank and dash cells**, in either language, as real notes. Where the English
+  half leaves a box blank and the translation writes a syllable in it, that
+  syllable goes on the note the English holds its vowel across.
 
 Nothing is decided behind your back: every step is an editable table before the
-PDF is made, and Step 5 lists anything that will be left empty.
+PDF is made, and Step 5 lists anything that will be left empty. On the generated
+score itself, clicking a syllable opens a box on top of it — type over it where
+it sits, Enter to keep, Escape to leave it. Notes the app was unsure about are
+red on screen and turn green once you have settled them; the downloaded PDF is
+always plain black.
 
 ---
 
@@ -113,12 +130,11 @@ PDF is made, and Step 5 lists anything that will be left empty.
 Two things, both reading the read-only corpus in `test-data/`:
 
 ```bash
-python3 -m pytest tests_layout_regressions.py   # 18 tests, all passing
+python3 -m pytest tests_layout_regressions.py   # 29 tests, all passing
 python3 corpus_baseline.py                      # the whole corpus, scored
 ```
 
-`tests_layout_regressions.py` pins one reproduced defect each. Ten of the
-eighteen fail at the `v1.0` tag, which is what makes them regression tests rather
+`tests_layout_regressions.py` pins one reproduced defect each. Most of them fail at the `v1.0` tag, which is what makes them regression tests rather
 than descriptions of current behaviour.
 
 `corpus_baseline.py` replays the app's pipeline over every case with no human
@@ -129,18 +145,24 @@ Current standing, from `v1.0` to now:
 | --- | --- | --- |
 | More Than Sparrows / WY | 81 | **109 / 112** |
 | Hands Drop Down / EMB-Diphthong | 83 | **108 / 112** |
-| Hands Drop Down / AP | 55 | **103 / 112** |
 | Hands Drop Down / KIM | 91 | **102 / 112** |
 | Hands Drop Down / QUB | 81 | **100 / 112** |
-| We Go Preaching / QII | 58 | **61 / 67** |
+| We Go Preaching / QII | 58 | **64 / 67** |
 | We Go Preaching / WY | 57 | **60 / 67** |
 | By Faith / QII | 31 | **45 / 52** |
-| By Faith / WY | 36 | **44 / 52** |
+| By Faith / QU | new | **45 / 52** |
+| By Faith / WY | 36 | **45 / 52** |
 | More Than Sparrows / EMB | 21 | **25 / 111** |
+| Rise Again / QUB | new | **61 / 61** |
+| Trust in you / QUB | new | **18 / 18** |
 
-757 of 909 rows, from 594. The song title is not counted: it appears in the
-answer keys and in neither half of any layout, so no reading of the inputs can
-produce it.
+885 of 988 rows. Hands Drop Down / AP is withdrawn from scoring: its English
+half heads one block `Ch2, 3` where the translation writes Ch2 and Ch3 out
+separately, so twelve translated rows have nothing opposite them - a document
+matter, not a defect. Rise Again and Trust in you are songs the fixes were never
+tuned on: both were added after the work above and scored on first contact. The
+song title is not counted: it appears in the answer keys and in neither half of
+any layout, so no reading of the inputs can produce it.
 
 `tests_byfaith_exact.py`, `tests_semantic_pairing.py` and
 `tests_mixed_harmony.py` read from `/mnt/data/...`, which is not in this

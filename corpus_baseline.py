@@ -61,6 +61,15 @@ class Case:
         return f"{self.song} / {self.variant}"
 
 
+# Cases withdrawn from scoring. These are not app defects and measuring them
+# only muddies the numbers the code is judged on. Hannah withdrew Hands Drop
+# Down / AP on 27 Aug 2026: its English half heads one block "Ch2, 3" while the
+# translation writes Ch2 and Ch3 out separately, so twelve translated rows have
+# nothing opposite them. The folder stays in test-data and the layout-reader
+# regression tests still read it as a document.
+WITHDRAWN = {("Hands Drop Down", "AP")}
+
+
 def discover_cases() -> list[Case]:
     """Every test-data folder holding a score, a layout and an answer key."""
     cases: list[Case] = []
@@ -80,12 +89,12 @@ def discover_cases() -> list[Case]:
                 low = entry.lower()
                 if low.startswith("english score"):
                     score = path
-                elif low.startswith("syllabus layout") or low.startswith("syllablelayout"):
+                elif low.replace(" ", "").startswith(("syllabuslayout", "syllablelayout")):
                     layout = path
                 else:
                     # the answer key: "Key_XX_osg_..." or "XX_osg_..."
                     key = path
-            if score and layout and key:
+            if score and layout and key and (song, variant) not in WITHDRAWN:
                 cases.append(Case(song, variant, score, layout, key))
     return cases
 
