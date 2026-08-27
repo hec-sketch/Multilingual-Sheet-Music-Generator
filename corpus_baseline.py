@@ -33,6 +33,7 @@ from smgcore import lock as lock_mod  # noqa: E402
 from smgcore import pairing as pairing_mod  # noqa: E402
 from smgcore import render as render_mod  # noqa: E402
 from smgcore import score as score_mod  # noqa: E402
+from smgcore import spelling as spelling_mod  # noqa: E402
 
 def _find_test_data() -> str:
     """The read-only corpus, wherever this repository has been checked out."""
@@ -46,6 +47,12 @@ def _find_test_data() -> str:
 
 
 TEST_DATA = _find_test_data()
+
+
+SPELLING_MAPS = {
+    "More Than Sparrows / EMB (Missing Syllable in Chorus)":
+        os.path.join(HERE, "spelling", "embera.txt"),
+}
 
 
 @dataclass
@@ -144,6 +151,17 @@ def run_case(case: Case, *, render: bool = True) -> Run:
         return Run(case, score_doc, layout_doc, all_rows, [], [], [], [], {}, None,
                    {}, {}, {}, [], None,
                    error="split_in_half found no English half (app would stop here)")
+
+    # A layout typed without the language's own letters is corrected from the map
+    # for that language. Named case by case rather than by language, because a
+    # map is only right for a layout that was actually typed plainly: Hands Drop
+    # Down / EMB-Diphthong is the same language and already carries its own
+    # letters, and running a map over it would corrupt it. See smgcore/spelling.
+    spelling_file = SPELLING_MAPS.get(case.name)
+    if spelling_file and os.path.exists(spelling_file):
+        spelling_mod.apply_to_lines(
+            editable_lines, spelling_mod.parse(open(spelling_file).read())
+        )
 
     # app.py:583 - nothing dropped
     working_lines = list(editable_lines)

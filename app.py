@@ -25,6 +25,7 @@ from smgcore import lock as lock_mod
 from smgcore import pairing as pairing_mod
 from smgcore import render as render_mod
 from smgcore import score as score_mod
+from smgcore import spelling as spelling_mod
 
 st.set_page_config(page_title="Multi-lingual Sheet Music Generator", page_icon="♪", layout="wide")
 
@@ -243,9 +244,10 @@ def render_cached(_score_doc, blank: bytes, _placements, _held, _nudges, size, o
         max_size=size, baseline_offset=offset, font_choice=font
     )
     layout: list[dict] = []
+    notes: list[str] = []
     pdf = render_mod.render(_score_doc, blank, _placements, settings, _held, _nudges,
-                            layout_out=layout)
-    return pdf, layout
+                            layout_out=layout, warnings_out=notes)
+    return pdf, layout, notes
 
 
 @st.cache_data(show_spinner="Marking what needs a look...", max_entries=3)
@@ -298,6 +300,8 @@ STATE_KEYS = (
     "has_generated",
     "preview_page",
     "active_step",
+    "spelling_map",
+    "spelling_editor",
 )
 # Kept while the piece is being worked on and cleared only by "Start a new project".
 SESSION_KEYS = ("reference_audio", "max_size", "baseline", "font_choice")
@@ -349,6 +353,7 @@ def seed_state() -> None:
         ("dropped_layout", set()),
         ("upload_round", 0),
         ("active_step", 1),
+        ("spelling_map", ""),
     ]:
         st.session_state.setdefault(key, default)
 
@@ -611,6 +616,15 @@ if not combined_document:
         "underneath by the translated one, the same boxes in the same order "
         "(so the same number of pages of each). Only one language was found.",
     )
+
+# Some layouts are typed with a tool that cannot produce the language's own
+# letters - Acrobat's typewriter under WinAnsiEncoding has no `ʉ` in it, so the
+# translation comes through as `bu` for `bʉ` and `jen` for `jẽ`. The characters
+# are not in the file in any form, so they cannot be recovered and must not be
+# guessed at; the correspondence is supplied once, on Step 3, and applied here
+# before anything else reads the words.
+spelling_map = spelling_mod.parse(st.session_state.get("spelling_map", ""))
+spelling_mod.apply_to_lines(editable_lines, spelling_map)
 
 working_lines = [
     line for line in editable_lines if line.id not in st.session_state["dropped_layout"]
@@ -968,6 +982,39 @@ if step == 3:
     )
     for note in pair_result.notes:
         st.info(note)
+
+    # Spelling. Some layouts are typed with a tool that cannot produce the
+    # language's own letters, so the translation arrives in a plain spelling -
+    # `bu` for `bʉ`, `jen` for `jẽ`. Those characters are not in the file in any
+    # form and the app must not invent them; the correspondence is given here
+    # once and applied to every cell in the score.
+    with st.expander("Spelling — if the layout was typed without the language's letters"):
+        st.markdown(
+            "Some layouts are typed with a tool that cannot produce every letter "
+            "the language uses, so a syllable arrives spelt plainly. Write the "
+            "correspondence here, one a line, as **`as typed -> as it reads`**:"
+        )
+        st.code("bu -> bʉ\nkrin -> krĩ\nun -> ũ", language=None)
+        st.text_area(
+            "Spelling corrections",
+            key="spelling_editor",
+            value=st.session_state.get("spelling_map", ""),
+            height=160,
+            label_visibility="collapsed",
+            help="Matching ignores capitals and any punctuation printed around a "
+                 "syllable. A map is per language, so one written for a language "
+                 "corrects every layout in it that follows.",
+        )
+        left, right = st.columns([1, 2])
+        if left.button("Apply spelling", key="apply_spelling"):
+            st.session_state["spelling_map"] = st.session_state.get("spelling_editor", "")
+            st.rerun()
+        if spelling_map:
+            right.markdown(
+                f"**{len(spelling_map)} correction(s) in use.** "
+                "The score, the table below and the checking sheet all show the "
+                "corrected spelling."
+            )
 
     st.markdown("---")
     st.markdown(
@@ -1342,11 +1389,12 @@ if step == 5:
 
     result = None
     result_layout: list[dict] = []
+    font_notes: list[str] = []
     if st.session_state.get("has_generated"):
         # Rendering is cached on the type settings, so moving a slider re-renders and the
         # preview follows immediately. Generate does not have to be pressed again.
         try:
-            result, result_layout = render_cached(
+            result, result_layout, font_notes = render_cached(
                 score_doc,
                 blank_bytes,
                 placements,
@@ -1370,6 +1418,10 @@ if step == 5:
                 f'<strong>The score could not be generated.</strong> {error}</div>',
                 unsafe_allow_html=True,
             )
+        # A language written in a script no available font can draw would
+        # otherwise print as gaps, with nothing on the page to say why.
+        for note in font_notes:
+            st.warning(note)
         st.session_state["result_pdf"] = result
 
     # The proofing copy: the same score with every note the app was unsure about

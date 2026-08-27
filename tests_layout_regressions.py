@@ -924,3 +924,406 @@ def test_d23_a_crowded_syllable_moves_rather_than_shrinks():
             if item["slot"] == "english" and round(item["x"], 1) not in anchors:
                 moved += 1
     assert moved, "no syllable was moved at all - crowding is not being resolved this way"
+
+
+def test_d24_a_clipped_annotation_row_is_not_read_twice():
+    """A syllable clipped out of an annotation's drawn copy is added once, not twice.
+
+    The translated half of More Than Sparrows / EMB is typed into FreeText
+    annotations. One of them was drawn narrower than its own text, so the
+    appearance the viewer paints stops after `ja ra` and the closing `si:` is
+    clipped away - while the annotation still stores the whole row.
+
+    The reader then compared each stored word with what was drawn by position.
+    Against a clipped copy that estimate drifts rightward word by word: the
+    syllables at the start still overlapped their drawn twins, the ones at the
+    end no longer did, and `ja` and `ra` were each added a second time. Twenty
+    rows of the score printed `ja ja ra ra si:`.
+    """
+    _, translated = halves("More Than Sparrows", "EMB (Missing Syllable in Chorus)")
+    row = next((line for line in translated
+                if line.tokens[:4] == ["je", "sus", "ba", "ra"]
+                and line.tokens[-1] == "si:"), None)
+    assert row is not None, "the clipped row is no longer in this layout"
+    assert row.tokens == ["je", "sus", "ba", "ra", "ja", "ra", "si:"], row.tokens
+    for token in row.tokens:
+        assert " " not in token, f"{token!r} holds two words - the row was read twice"
+
+
+# ------------------------------------------------------------------------- D26
+#
+# The score is set in one font, and a font covers the one alphabet it was cut
+# for. Asked for a character it does not have, it hands back .notdef - which
+# PyMuPDF draws as a nul - so a score in Chinese or Korean came out with every
+# syllable silently missing and the notes bare.
+
+
+def _drawn_on(pdf_bytes) -> set:
+    """Every character that actually reached the page."""
+    import pymupdf as fitz
+
+    seen: set = set()
+    for page in fitz.open(stream=pdf_bytes, filetype="pdf"):
+        for block in page.get_text("dict")["blocks"]:
+            for line in block.get("lines", []):
+                for span in line["spans"]:
+                    seen |= set(span["text"])
+    return seen
+
+
+def _render_in(alphabet: str, song="By Faith", variant="QII"):
+    """Set one corpus case in a given script, as if that were the translation."""
+    from smgcore import blankscore, render as render_module
+
+    score_doc, plans = plan_for(song, variant)
+    folder = os.path.join(_test_data(), song, variant)
+    name = next(e for e in os.listdir(folder) if e.lower().startswith("english score"))
+    blank, _ = blankscore.strip_lyrics(open(os.path.join(folder, name), "rb").read(),
+                                       score_doc)
+    placements = {
+        assignment.score_line_id: [alphabet[i % len(alphabet)]
+                                   for i in range(len(assignment.tokens))]
+        for plan in plans.values() for assignment in plan.assignments
+    }
+    assert placements, "this case placed no syllables at all"
+    notes: list[str] = []
+    settings = render_module.RenderSettings(max_size=score_doc.lyric_font[1])
+    pdf = render_module.render(score_doc, blank, placements, settings,
+                               warnings_out=notes)
+    return pdf, placements, notes
+
+
+@pytest.mark.parametrize("script,alphabet", [
+    ("Chinese", "信心是活的东西"),
+    ("Korean", "믿음은살아있는것"),
+    ("Japanese", "しんこうはいきて"),
+    ("Russian", "вераживая"),
+    ("Greek", "πίστηζωντανή"),
+    ("Hebrew", "אמונהחיה"),
+    ("Arabic", "الإيمانحي"),
+])
+def test_d26_a_score_can_be_set_in_a_script_the_chosen_font_lacks(script, alphabet):
+    """Every syllable reaches the page, whatever alphabet it is written in.
+
+    Liberation Serif has no Chinese, no Korean, no Arabic. Before the font was
+    chosen per syllable, all of these drew as nul characters: the render
+    reported hundreds of syllables placed and the printed score had none of
+    them on it.
+    """
+    pdf, placements, notes = _render_in(alphabet)
+    wanted = {ch for tokens in placements.values() for token in tokens for ch in token}
+    missing = wanted - _drawn_on(pdf)
+    assert not missing, (
+        f"{script}: {''.join(sorted(missing))} never reached the page - the font "
+        "chain has no font that can draw them"
+    )
+    assert not notes, f"{script} should need no warning, but got {notes}"
+
+
+def test_d26_a_script_no_font_can_draw_is_reported_rather_than_left_blank():
+    """Printing gaps and saying nothing is the one outcome that must not happen.
+
+    Nothing available draws Thai. That is a fair thing for the app not to do;
+    it is not a fair thing for it to do quietly, because the score looks
+    finished and is not.
+    """
+    _, _, notes = _render_in("ศรัทธามีชีวิต")
+    assert notes, "a script with no font at all was rendered without a word about it"
+    assert "fonts" in notes[0], f"the warning does not say how to fix it: {notes[0]}"
+
+
+def test_d26_a_latin_score_is_still_set_in_the_chosen_font():
+    """The fallbacks are for what the chosen font cannot draw, and nothing else.
+
+    Every corpus case is written in a Latin alphabet, so every syllable must
+    still be set in the font that was picked - not quietly moved to a fallback
+    that happens to cover it too.
+    """
+    import collections
+
+    import pymupdf as fitz
+
+    from smgcore import blankscore, render as render_module
+
+    score_doc, plans = plan_for("By Faith", "WY")
+    folder = os.path.join(_test_data(), "By Faith", "WY")
+    name = next(e for e in os.listdir(folder) if e.lower().startswith("english score"))
+    blank, _ = blankscore.strip_lyrics(open(os.path.join(folder, name), "rb").read(),
+                                       score_doc)
+    placements = {
+        assignment.score_line_id: assignment.tokens
+        for plan in plans.values() for assignment in plan.assignments
+    }
+    notes: list[str] = []
+    pdf = render_module.render(score_doc, blank, placements,
+                               render_module.RenderSettings(), warnings_out=notes)
+    assert not notes, f"a Latin score reported a font shortfall: {notes}"
+
+    fonts = collections.Counter()
+    for page in fitz.open(stream=pdf, filetype="pdf"):
+        for block in page.get_text("dict")["blocks"]:
+            for line in block.get("lines", []):
+                for span in line["spans"]:
+                    if span["text"].strip():
+                        fonts[span["font"].split("+")[-1]] += 1
+    assert fonts["LiberationSerif"], "nothing was set in the chosen font at all"
+
+
+def test_d26_a_one_character_syllable_is_not_thrown_away_as_a_mis_key():
+    """A lone consonant is a slip; a lone Chinese character is a whole syllable.
+
+    A single letter that cannot be sung is dropped, because left in it takes a
+    note of its own and pushes the real syllable off the end of the line. That
+    reasoning is about an alphabet spelling a syllable out of consonants and
+    vowels, and it was being applied to every script - so every one-character
+    Chinese, Korean or Japanese syllable was silently deleted, along with every
+    Cyrillic and Greek letter, whose vowels are not in the Latin vowel list
+    either.
+    """
+    from smgcore.layout import _is_stray_letter
+
+    for slip in ("b", "k", "j", "Z"):
+        assert _is_stray_letter(slip), f"{slip!r} is a bare consonant and cannot be sung"
+    for syllable in ("信", "믿", "し", "в", "а", "π", "א", "a", "e"):
+        assert not _is_stray_letter(syllable), (
+            f"{syllable!r} was thrown away as a mis-key; it is a syllable"
+        )
+
+
+@pytest.mark.parametrize("song,variant", CASES)
+def test_d24_no_row_holds_the_same_word_twice_over(song, variant):
+    """No cell anywhere in the corpus ends up holding one word written twice.
+
+    A cell is one note. Two words in it is the signature of a row that was read
+    from both the page and its annotation, and it is worth watching across every
+    case rather than only the one that showed it.
+    """
+    _, translated = halves(song, variant)
+    for line in translated:
+        for token in line.tokens:
+            parts = token.split()
+            assert not (len(parts) == 2 and parts[0] == parts[1]), (
+                f"{song}/{variant}: cell {token!r} holds the same word twice"
+            )
+
+
+# ---------------------------------------------------------------------------
+# D27 - an accent written as a combining mark must land on its own letter.
+#
+# Nothing in this app shapes text. A combining mark is a zero-width glyph drawn
+# wherever the pen has reached, so after a wide letter such as `ʉ` it falls over
+# the *next* letter: `mʉ̃a` printed as `mʉã`, and `naʉ̃-ta` put the tilde on the
+# hyphen. It round-trips as the right characters, so no text comparison could
+# see it - only the printed page shows it. `ʉ` is written 352 times and the
+# combining tilde 156 times across the answer keys, so this is the orthography
+# of a real translation, not an edge case.
+# ---------------------------------------------------------------------------
+
+
+def _ink_span(text, size=60):
+    """The horizontal extent of the ink a string actually puts on the page."""
+    import pymupdf as fitz
+
+    from smgcore.render import FontChain
+
+    chain = FontChain("Serif (matches most scores)")
+    doc = fitz.open()
+    page = doc.new_page(width=400, height=200)
+    shape = page.new_shape()
+    chain.draw(shape, page, (60.0, 130.0), text, size, (0.0, 0.0, 0.0))
+    shape.commit()
+    pix = page.get_pixmap(colorspace=fitz.csGRAY)
+    data, wide = pix.samples, pix.width
+    left = right = None
+    for row in range(pix.height):
+        line = data[row * wide:(row + 1) * wide]
+        for column, value in enumerate(line):
+            if value < 250:
+                left = column if left is None else min(left, column)
+                right = column if right is None else max(right, column)
+    assert left is not None, f"{text!r} drew nothing at all"
+    return left, right
+
+
+def test_d27_a_combining_mark_sits_on_its_own_letter():
+    """The tilde of `ʉ̃` must sit over the ʉ, not to the right of it."""
+    bare = _ink_span("ʉ")
+    marked = _ink_span("ʉ̃")
+    # The mark is written above the letter, so it may make the ink taller but it
+    # must not push it sideways: same left edge, and no wider to the right than
+    # the letter itself plus a hair.
+    assert abs(marked[0] - bare[0]) <= 2, (
+        f"the mark moved the left edge: bare {bare}, marked {marked}"
+    )
+    assert marked[1] <= bare[1] + 2, (
+        f"the mark was drawn to the right of its letter: bare {bare}, marked {marked}"
+    )
+
+
+def test_d27_a_combining_mark_does_not_land_on_the_next_letter():
+    """`mʉ̃a` must not print as `mʉã`."""
+    plain = _ink_span("mʉa")
+    marked = _ink_span("mʉ̃a")
+    assert marked[1] <= plain[1] + 2, (
+        f"the mark widened the word, so it fell past its letter: {plain} -> {marked}"
+    )
+
+
+def test_d27_an_accent_is_written_as_the_single_letter_the_font_has():
+    """`a` + combining tilde and `ã` are the same letter and must print alike."""
+    from smgcore.render import compose
+
+    assert compose("ã") == "ã"
+    assert _ink_span("ã") == _ink_span("ã")
+
+
+def test_d27_a_letter_with_no_single_form_is_still_measured_as_one():
+    """`ʉ̃` has no precomposed character, so it must measure as the letter alone.
+
+    The type size for the whole score comes from these widths; a mark counted as
+    a character of its own would make every line carrying one measure too wide.
+    """
+    from smgcore.render import FontChain
+
+    chain = FontChain("Serif (matches most scores)")
+    assert chain.width("mʉ̃a", 11.0) == pytest.approx(chain.width("mʉa", 11.0))
+
+
+def test_d27_the_corpus_orthography_is_all_drawable():
+    """Every accented letter the answer keys use can be drawn, and drawn alone."""
+    from smgcore.render import FontChain
+
+    chain = FontChain("Serif (matches most scores)")
+    for syllable in ["bʉ", "mʉ̃", "jẽ", "krĩ", "kʼã", "tẽã", "wũã", "duʼ",
+                     "Maʉ̃ʉ̃", "ñ", "á", "í", "ú", "ó", "ü", "õ", "¿", "’"]:
+        assert chain.face_for(syllable) is not None, f"{syllable!r} has no font"
+    assert not chain.shortfall(), (
+        f"the corpus orthography reported a shortfall: {chain.shortfall()}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# D28 - a layout typed without the language's own letters.
+#
+# More Than Sparrows / EMB was typed into the PDF with Acrobat's typewriter in
+# Courier New under WinAnsiEncoding, an encoding with no `ʉ` in it, so the
+# translator typed `bu` for `bʉ` and a trailing `n` for the nasal tilde. The
+# characters are in the file in no form at all - not the /Contents string, not
+# the appearance stream, not the page text - so they cannot be recovered, and
+# `u` is `ʉ` in `bu` but stays `u` in `ju ru`, so no letter rule is true either.
+# The correspondence is supplied once and applied; these tests pin the applying.
+# ---------------------------------------------------------------------------
+
+
+def test_d28_a_spelling_map_is_read_however_it_was_written():
+    from smgcore.spelling import parse
+
+    mapping = parse(
+        "# where this came from\n"
+        "\n"
+        "bu -> bʉ\n"
+        "krin = krĩ\n"
+        "un\tũ\n"
+    )
+    assert mapping == {"bu": "bʉ", "krin": "krĩ", "un": "ũ"}
+
+
+def test_d28_a_syllable_is_corrected_whatever_is_printed_around_it():
+    """The comma in `rea,` and the quotes in `«i` are not part of the word."""
+    from smgcore.spelling import correct_word, parse
+
+    mapping = parse("bu -> bʉ\ni -> ĩ")
+    assert correct_word("bu.", mapping) == "bʉ."
+    assert correct_word("«i»", mapping) == "«ĩ»"
+    assert correct_word("bu,", mapping) == "bʉ,"
+
+
+def test_d28_the_capital_the_layout_used_is_kept():
+    """A map says how a word is spelt, not whether it opens a line."""
+    from smgcore.spelling import correct_word, parse
+
+    mapping = parse("kan -> kã")
+    assert correct_word("kan", mapping) == "kã"
+    assert correct_word("Kan", mapping) == "Kã"
+
+
+def test_d28_a_word_the_map_says_nothing_about_is_left_alone():
+    """`u` is `ʉ` in `bu` and stays `u` in `ju`; only what is listed changes."""
+    from smgcore.spelling import correct_cell, parse
+
+    mapping = parse("bu -> bʉ")
+    assert correct_cell("ku", mapping) == "ku"
+    assert correct_cell("za", mapping) == "za"
+    # Two syllables sharing one note are corrected separately.
+    assert correct_cell("bu za", mapping) == "bʉ za"
+
+
+def test_d28_correcting_the_spelling_never_changes_the_note_count():
+    """A cell is a note. If a map could split or merge cells it would move the song."""
+    from smgcore.spelling import apply_to_lines, parse
+
+    _, translated = halves("More Than Sparrows", "EMB (Missing Syllable in Chorus)")
+    before = [len(line.tokens) for line in translated]
+    mapping = parse("bu -> bʉ\nkrin -> krĩ\nun -> ũ\nin -> ĩ")
+    apply_to_lines(translated, mapping)
+    assert [len(line.tokens) for line in translated] == before
+
+
+def test_d28_no_map_leaves_the_layout_exactly_as_it_was():
+    from smgcore.spelling import apply_to_lines
+
+    _, translated = halves("More Than Sparrows", "EMB (Missing Syllable in Chorus)")
+    before = [list(line.tokens) for line in translated]
+    apply_to_lines(translated, {})
+    assert [line.tokens for line in translated] == before
+
+
+def test_d28_the_shipped_embera_map_corrects_that_layout():
+    """The map in spelling/ is the one measured against the finished EMB score."""
+    from smgcore.spelling import apply_to_lines, parse
+
+    path = os.path.join(HERE, "spelling", "embera.txt")
+    assert os.path.exists(path), "the Emberá spelling map is missing"
+    mapping = parse(open(path).read())
+    assert mapping.get("bu") == "bʉ"
+
+    _, translated = halves("More Than Sparrows", "EMB (Missing Syllable in Chorus)")
+    assert "ʉ" not in " ".join(t for line in translated for t in line.tokens), (
+        "this layout is supposed to be the one typed without the language's letters"
+    )
+    apply_to_lines(translated, mapping)
+    corrected = " ".join(t for line in translated for t in line.tokens)
+    assert "ʉ" in corrected and "ĩ" in corrected, (
+        "the map was applied but the layout still has none of the language's letters"
+    )
+
+
+def test_d28_a_rule_may_name_syllables_sung_one_after_another():
+    """Emberá `u` is `ʉ̃` in `maʉ̃-ʉ̃-rʉ` and plain `u` in `tai u-no-ta`.
+
+    No rule about the word `u` on its own can tell those apart; naming the two
+    syllables together can, and that one rule settled sixteen rows.
+    """
+    from smgcore.spelling import apply_to_lines, parse
+
+    mapping = parse("mau u -> maʉ̃ ʉ̃")
+
+    class Line:
+        def __init__(self, tokens):
+            self.tokens = tokens
+
+    lines = [Line(["mau", "u", "ru"]), Line(["tai", "u", "no"])]
+    apply_to_lines(lines, mapping)
+    assert lines[0].tokens == ["maʉ̃", "ʉ̃", "ru"]
+    assert lines[1].tokens == ["tai", "u", "no"], (
+        "a run-of-syllables rule fired on syllables that are not that run"
+    )
+
+
+def test_d28_a_rule_that_would_change_the_note_count_is_refused():
+    """A syllable is a note. A rule adding or dropping one could move the song."""
+    from smgcore.spelling import parse
+
+    assert parse("mau u -> maʉ̃") == {}
+    assert parse("mau -> ma ʉ̃") == {}
+    assert parse("mau u -> maʉ̃ ʉ̃") == {"mau u": "maʉ̃ ʉ̃"}

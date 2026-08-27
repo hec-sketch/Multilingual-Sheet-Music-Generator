@@ -1,0 +1,61 @@
+# Emberá (EMB) spelling map
+#
+# The EMB layouts were typed with Acrobat's typewriter in Courier New under
+# WinAnsiEncoding, which has no ʉ in it. So the translation arrives in a plain
+# spelling: u for ʉ, and the nasal tilde written as a trailing n in some
+# syllables (jen for jẽ) and left off altogether in others (mau for maʉ̃).
+#
+# Derived by aligning the app's output against the finished EMB score for
+# jwb-140 "More Than Many Sparrows": 62 distinct plain spellings, of which 59
+# stand for exactly one proper spelling.
+#
+# CHECK THIS BEFORE TRUSTING IT. It is a reading of one finished score, not the
+# authority on the language. Correct any line and the whole score follows.
+#
+# Three spellings are genuinely ambiguous and are deliberately NOT listed, because
+# a flat map would get them wrong more often than right. They have to be fixed by
+# hand on the score, or by the translator writing them differently in the layout:
+#
+#   ra  -> ra (8) but rã (3)
+#   ka  -> the key itself writes "bʉ ka rea" as kʼa in one place and ka in the
+#          other, so nothing local can tell them apart. Left plain.
+#
+# `u` was ambiguous the same way - ʉ̃ in "maʉ̃-ʉ̃-rʉ", plain u in "tai u-no-ta" -
+# and is settled below by naming the two syllables together instead.
+#
+# typed -> reads
+
+bu -> bʉ
+dau -> daʉ
+ea -> ẽã
+in -> ĩ
+jan -> jã
+jen -> jẽ
+ju -> jʉ
+kan -> kã
+ki -> kĩ
+kri -> krĩ
+krin -> krĩ
+ku -> kʉ
+mau -> maʉ̃
+mu -> mʉ̃
+mua -> mʉ̃a
+nau -> naʉ̃
+pua -> pʉa
+rei -> rẽi
+ru -> rʉ
+sa -> sã
+sus -> sús
+tea -> tẽã
+un -> ũ
+we -> wẽ
+wua -> wũã
+
+# Rules naming syllables sung one after another, for spellings the layout
+# writes the same way in two places and means differently.
+mau u -> maʉ̃ ʉ̃
+a du a -> a duʼ a
+ka rei -> kʼã rẽi
+
+# Written once each in this song, so unambiguous but worth a second look.
+bi -> biʼ
