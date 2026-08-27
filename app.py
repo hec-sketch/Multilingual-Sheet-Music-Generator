@@ -287,6 +287,7 @@ STATE_KEYS = (
     "english_edits",
     "pair_overrides",
     "assign_edits",
+    "assign_base",
     "held_edits",
     "skip_voices",
     "dropped_layout",
@@ -340,6 +341,7 @@ def seed_state() -> None:
         ("pair_overrides", {}),
         ("pair_round", 0),
         ("assign_edits", {}),
+        ("assign_base", {}),
         ("held_edits", {}),
         ("nudge_edits", {}),
         ("preview_edit_text", {}),
@@ -658,6 +660,25 @@ def edited_tokens(voice_name: str, assignment) -> list[str]:
     return override.split() if override is not None else list(assignment.tokens)
 
 
+def solo_is_stale(voice_name: str, assignment) -> bool:
+    """Whether Step 3 has moved on since this voice's own words were typed.
+
+    Words assigned to one voice alone are meant to differ from the line every
+    other voice sings, so differing from Step 3 is not by itself a problem and
+    must not be treated as one. What matters is Step 3 changing *afterwards*:
+    the line these words were written against is no longer the line in the
+    layout, and this voice is the one place in the score that never heard about
+    it. So the Step 3 words are remembered as they stood when the voice's own
+    were typed, and it is those that are compared - not the two texts, which are
+    supposed to disagree.
+    """
+    key = f"{voice_name}||{assignment.score_line_id}"
+    if st.session_state["assign_edits"].get(key) is None:
+        return False
+    typed_against = st.session_state["assign_base"].get(key)
+    return typed_against is not None and typed_against != " ".join(assignment.tokens)
+
+
 def edited_held(voice_name: str, assignment) -> list[tuple]:
     """Syllables sitting on held notes, including anything typed over them.
 
@@ -697,6 +718,7 @@ layout_trouble = [
 ]
 pair_trouble = [pair for pair in pairs if pair.status != "ok"]
 mismatched_lines = []
+stale_solos = []
 empty_notes = 0
 for voice_name, voice_plan in plans.items():
     for assignment in voice_plan.assignments:
@@ -705,11 +727,13 @@ for voice_name, voice_plan in plans.items():
         empty_notes += sum(1 for index in range(need) if index >= len(tokens) or not tokens[index])
         if len(tokens) != need:
             mismatched_lines.append((voice_name, assignment, len(tokens), need))
+        if solo_is_stale(voice_name, assignment):
+            stale_solos.append((voice_name, assignment))
 
 score_state = "err" if geometry_problems else ("warn" if score_doc.warnings else "ok")
 layout_state = "warn" if layout_trouble else "ok"
 pair_state = "warn" if pair_trouble else "ok"
-notes_state = "warn" if (mismatched_lines or empty_notes) else "ok"
+notes_state = "warn" if (mismatched_lines or empty_notes or stale_solos) else "ok"
 ready_state = "ok" if st.session_state.get("has_generated") else "todo"
 
 states = [score_state, layout_state, pair_state, notes_state, ready_state]
@@ -1159,6 +1183,29 @@ if step == 4:
     if len(mismatched_lines) > 25:
         st.caption(f"...and {len(mismatched_lines) - 25} more.")
 
+    # Words assigned to one voice are held by that voice alone, so a Step 3
+    # correction to the same line reaches every other voice and not this one.
+    # That is what was asked for and stays that way; what it must not do is
+    # happen quietly, so the lines Step 3 has since changed are named here.
+    attention_table(
+        [
+            {
+                "Voice": voice_name,
+                "Page": assignment.page + 1,
+                "Section": assignment.section,
+                "English in the score": assignment.english,
+                "This voice sings": st.session_state["assign_edits"].get(
+                    f"{voice_name}||{assignment.score_line_id}", ""
+                ),
+                "Step 3 now": " ".join(assignment.tokens),
+            }
+            for voice_name, assignment in stale_solos[:25]
+        ],
+        "Lines this voice keeps its own words for, where Step 3 has since changed",
+    )
+    if len(stale_solos) > 25:
+        st.caption(f"...and {len(stale_solos) - 25} more.")
+
     st.markdown("---")
 
     st.multiselect(
@@ -1215,19 +1262,39 @@ if step == 4:
             "different words."
         )
 
+    stale_here = [a for a in plan.assignments if solo_is_stale(voice, a)]
+    if stale_here:
+        st.markdown(
+            f'<div class="smg-banner smg-banner--attn">'
+            f'<span class="smg-icon">{ICONS["warn"]}</span>'
+            f"<strong>Step 3 has changed under {len(stale_here)} of this voice's own "
+            f"line{'s' if len(stale_here) != 1 else ''}.</strong> "
+            "They still sing what was typed here, which is what words assigned to one "
+            "voice are for — but the layout has moved on since. The <em>Step 3 now</em> "
+            "column shows what the line reads there. Clear a cell to take that reading, "
+            "or leave it to keep this voice's own.</div>",
+            unsafe_allow_html=True,
+        )
+
     rows = []
     for assignment in plan.assignments:
         key = f"{voice}||{assignment.score_line_id}"
         override = st.session_state["assign_edits"].get(key)
-        text = override if override is not None else " ".join(assignment.tokens)
+        from_step_3 = " ".join(assignment.tokens)
+        text = override if override is not None else from_step_3
+        stale = solo_is_stale(voice, assignment)
         rows.append(
             {
-                "": ICONS["ok"] if len(text.split()) == len(assignment.tokens) else ICONS["warn"],
+                "": ICONS["adjust"] if stale else (
+                    ICONS["ok"] if len(text.split()) == len(assignment.tokens)
+                    else ICONS["warn"]
+                ),
                 "Page": assignment.page + 1,
                 "Section": assignment.section,
                 "English in the score": assignment.english,
                 "Notes": len(assignment.tokens),
                 "Syllables": text,
+                "Step 3 now": from_step_3 if stale else "",
                 "Nudge (pt)": st.session_state["nudge_edits"].get(key, ""),
                 "On held notes": assignment.held_text,
                 "Sung by": len(
@@ -1235,6 +1302,7 @@ if step == 4:
                                   for i in assignment.layout_line_ids))
                 ) if assignment.layout_line_ids else 1,
                 "_key": key,
+                "_base": from_step_3,
             }
         )
     edited_voice = st.data_editor(
@@ -1269,16 +1337,36 @@ if step == 4:
                 help="How many voices sing these words. Correcting them on Step 3 changes "
                 "them for all of them at once.",
             ),
+            "Step 3 now": st.column_config.TextColumn(
+                width="large",
+                disabled=True,
+                help="Filled in only where Step 3 has changed since this voice's own "
+                "words were typed, and showing what the line reads there now. Clear "
+                "the Syllables cell to take it.",
+            ),
             "_key": None,
+            "_base": None,
         },
         key=f"voice_editor_{voice}",
     )
     if solo:
         for _, row in edited_voice.iterrows():
-            st.session_state["assign_edits"][row["_key"]] = row["Syllables"]
+            typed = row["Syllables"]
+            # Cleared, so this voice stops singing its own words and goes back to
+            # the line everyone else sings - which is how a stale one is taken back.
+            if not str(typed).strip():
+                st.session_state["assign_edits"].pop(row["_key"], None)
+                st.session_state["assign_base"].pop(row["_key"], None)
+                continue
+            st.session_state["assign_edits"][row["_key"]] = typed
+            # What Step 3 read when these words were typed, so that Step 3 changing
+            # afterwards can be told from this voice simply singing something else.
+            st.session_state["assign_base"][row["_key"]] = row["_base"]
     else:
         for assignment in plan.assignments:
-            st.session_state["assign_edits"].pop(f"{voice}||{assignment.score_line_id}", None)
+            key = f"{voice}||{assignment.score_line_id}"
+            st.session_state["assign_edits"].pop(key, None)
+            st.session_state["assign_base"].pop(key, None)
     for _, row in edited_voice.iterrows():
         if str(row["Nudge (pt)"]).strip():
             st.session_state["nudge_edits"][row["_key"]] = row["Nudge (pt)"]
