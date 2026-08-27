@@ -41,10 +41,7 @@ MIN_AGREEMENT = 0.6
 MAX_FOLDED_SYLLABLES = 1
 # A syllable this voice has already sung is not folded onto a later note as well:
 # it was printed on its own note, and folding it on again both repeats the word
-# and leaves that note carrying something else. Scoped to the whole piece rather
-# than the page, which is worth six rows across the corpus but costs one each on
-# jwb-143 / Aymara and / KIM, where the same written row is sung again in a later
-# repeat and position alone cannot tell the two repeats apart.
+# and leaves that note carrying something else.
 HYPHENS = ("-", "‐", "‑", "–")
 
 SECTION_BONUS = 0.75      # the written line is labelled with the section being sung
@@ -354,39 +351,6 @@ def _fold_word_start(line: LockLine, offset: int, token: str,
     return "".join(head) + token
 
 
-def _fold_same_stream_prefix(line: LockLine, offset: int, token: str,
-                             sung: set | None = None, page: int = -1) -> str:
-    """Fold skipped translated boxes from the same colored stream onto entry note.
-
-    A score voice can begin in the middle of a layout row. If the skipped boxes belong
-    to the same semantic stream as the first matched box, their translated syllables
-    still belong to that musical entry and are conventionally printed together on the
-    first available note. This is exactly what happens with the Bridge: the Lead score
-    begins at ``preach`` inside ``We | preach``, so ``Mun- | do`` must enter as ``Mun-do``;
-    a Harmony entry beginning on a yellow box must never absorb the preceding blue Lead
-    boxes.
-    """
-    if offset <= 0 or offset >= len(line.translated):
-        return token
-    sem = line.semantic if len(line.semantic) == len(line.translated) else [""] * len(line.translated)
-    current = sem[offset]
-    if not current:
-        return token
-    sung = sung or set()
-    prefix = []
-    back = offset - 1
-    while back >= 0 and sem[back] == current and len(prefix) < MAX_FOLDED_SYLLABLES:
-        if (line.id, back) in sung:
-            break
-        value = (line.translated[back] or "").strip()
-        if value and value != "-":
-            prefix.insert(0, value)
-        back -= 1
-    if not prefix:
-        return token
-    return "".join(prefix) + token
-
-
 def _repeats_what_was_just_sung(combined: str, token: str, last: str) -> bool:
     """Whether a fold has put the syllable just sung onto this note as well.
 
@@ -453,7 +417,7 @@ def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=Non
                 plain = token
                 # First preserve a skipped prefix from the SAME semantic stream
                 # (e.g. We|preach -> Mun-|do => Mun-do for a Lead entry).
-                token = _fold_same_stream_prefix(line, offset, token, sung)
+                pass  # EXPERIMENT: stream fold disabled
                 # Then handle the narrower case where the entry begins inside a
                 # hyphenated English word.
                 token = (_fold_word_start(line, offset, token, sung)

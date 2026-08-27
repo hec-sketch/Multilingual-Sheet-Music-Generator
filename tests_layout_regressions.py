@@ -214,10 +214,8 @@ def test_a_line_wrapping_at_a_system_break_is_read_as_one_line():
         )
 
 
-@pytest.mark.xfail(reason="not yet fixed: a voice entering mid-line still folds the "
-                          "skipped syllables onto its first note", strict=True)
 def test_a_voice_entering_mid_line_does_not_glue_the_skipped_syllables():
-    """Reproduced, not yet fixed.
+    """A part entering part-way through a row takes the box it enters on.
 
     On the staves that re-enter at 'will not let my hands drop down.' with no 'I'
     engraved, the skipped 'Ma' is folded onto the next note as 'Maku'. The
