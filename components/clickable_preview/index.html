@@ -14,11 +14,17 @@ html,body{margin:0;padding:0;background:transparent;font-family:system-ui,sans-s
 #tools button{border:0;background:transparent;color:#f7f7f2;font-size:11px;line-height:1;
   padding:3px 5px;cursor:pointer;border-radius:3px;font-family:system-ui,sans-serif}
 #tools button:hover{background:rgba(255,255,255,.18)}
+/* A syllable typed but not yet drawn by the server: painted over the old one so
+   the page reads correctly the instant Enter is pressed. */
+.pend{position:absolute;transform:translate(-50%,-100%);white-space:pre;
+  font-family:"Liberation Serif",Georgia,"Times New Roman",serif;color:#11722F;
+  background:#F7F7F2;padding:0 2px;border-radius:2px;pointer-events:none}
 .tip{position:absolute;left:6px;top:6px;padding:3px 7px;background:rgba(247,247,242,.92);
   border:1px solid #a9b39c;border-radius:6px;font-size:11px;color:#2f3d4b;pointer-events:none}
 </style></head><body>
 <div id="wrap">
   <img id="img" alt="">
+  <div id="pending"></div>
   <div id="hotspots"></div>
   <input id="editor" spellcheck="false" autocomplete="off">
   <div id="tools">
@@ -40,7 +46,7 @@ html,body{margin:0;padding:0;background:transparent;font-family:system-ui,sans-s
 // centred like the syllable it replaces, so what is being typed is visible in
 // place - the score is the form. Enter commits, Escape cancels.
 
-var ARGS = null, ACTIVE = null, SEQ = 0;
+var ARGS = null, ACTIVE = null, SEQ = 0, SHOWN = null, PENDING = {};
 
 function post(msg) {
   window.parent.postMessage(Object.assign({isStreamlitMessage: true}, msg), "*");
@@ -72,9 +78,34 @@ function closeEditor(commit) {
   if (!spot) return;
   var text = editor.value.trim();
   if (commit && text !== (spot.label === "(no syllable)" ? "" : spot.label)) {
+    // Show the new syllable on the score straight away. Redrawing the page is
+    // the server's job and takes a moment; waiting for it to come back before
+    // anything changes on screen is what made typing here feel unlike typing.
+    PENDING[spot.key] = text;
+    paint();
     send({key: spot.key, voice: spot.voice, line_id: spot.line_id,
-          index: spot.index, action: "edit", text: text});
+          index: spot.index, slot: spot.slot, action: "edit", text: text});
   }
+}
+
+function paint() {
+  // Draw what has been typed but not yet come back from the server over the
+  // syllable it replaces, so the page always shows the latest word.
+  if (!ARGS) return;
+  var host = document.getElementById("pending");
+  var k = scale();
+  var baseline = (ARGS.baseline === undefined ? 5.6 : ARGS.baseline);
+  host.innerHTML = "";
+  (ARGS.hotspots || []).forEach(function (h) {
+    if (!(h.key in PENDING)) return;
+    var patch = document.createElement("div");
+    patch.className = "pend";
+    patch.textContent = PENDING[h.key];
+    patch.style.fontSize = ((h.size || 9.2) * k) + "px";
+    patch.style.left = (h.x * k) + "px";
+    patch.style.top = ((h.y + baseline) * k) + "px";
+    host.appendChild(patch);
+  });
 }
 
 function openEditor(spot, box) {
@@ -99,7 +130,7 @@ function openEditor(spot, box) {
   editor.focus();
   editor.select();
   send({key: spot.key, voice: spot.voice, line_id: spot.line_id,
-        index: spot.index, action: "select"});
+        index: spot.index, slot: spot.slot, action: "select"});
 }
 
 function place() {
@@ -123,6 +154,7 @@ function place() {
     b.onclick = function () { openEditor(h, b); };
     host.appendChild(b);
   });
+  paint();
   height();
 }
 
@@ -142,11 +174,11 @@ document.getElementById("tools").addEventListener("click", function (e) {
   var spot = ACTIVE;
   if (button.dataset.move) {
     send({key: spot.key, voice: spot.voice, line_id: spot.line_id, index: spot.index,
-          action: "nudge", delta: parseFloat(button.dataset.move)});
+          slot: spot.slot, action: "nudge", delta: parseFloat(button.dataset.move)});
     closeEditor(false);
   } else {
     send({key: spot.key, voice: spot.voice, line_id: spot.line_id, index: spot.index,
-          action: "keep"});
+          slot: spot.slot, action: "keep"});
     closeEditor(false);
   }
 });
@@ -155,7 +187,14 @@ function render(args) {
   ARGS = args || {};
   var img = document.getElementById("img");
   var src = "data:image/png;base64," + ARGS.image;
-  if (img.src !== src) { img.onload = place; img.src = src; }
+  if (ARGS.image !== SHOWN) {
+    // A freshly drawn page has arrived, so everything typed before it was made
+    // is now in the picture itself and no longer needs painting over the top.
+    SHOWN = ARGS.image;
+    PENDING = {};
+    img.onload = place;
+    img.src = src;
+  }
   if (img.complete) place();
 }
 

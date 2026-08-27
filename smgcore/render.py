@@ -37,8 +37,20 @@ class RenderSettings:
     max_size: float = 11.0
     baseline_offset: float = 5.6
     min_size: float = 4.5
-    font_choice: str = "Sans"
+    font_choice: str = "Serif (matches most scores)"
     colour: tuple = (0.0, 0.0, 0.0)
+
+
+# An engraver sets the lyrics of a score at one size throughout; a line that
+# came out smaller than the line above it reads as a mistake even when every
+# syllable in it is right. So the size is settled once for the whole document
+# rather than once per line, and a crowded line is answered by moving its
+# syllables apart - see resolve_overlaps - instead of by shrinking the type.
+#
+# It still cannot be the smallest line's size, because one line too full to fit
+# its staff at any reasonable size would shrink the whole score with it. So it
+# is the size all but the most crowded tenth of lines can hold.
+UNIFORM_PERCENTILE = 0.10
 
 
 def resolve_font_path(choice: str) -> str:
@@ -88,14 +100,20 @@ def check_geometry(score_doc, blank_bytes: bytes) -> list[str]:
     return problems
 
 
-def _bounds(anchors, index, staff_x0, staff_x1):
-    """Horizontal room available to the syllable at `index`."""
-    current = anchors[index]
-    left = staff_x0 + 1 if index == 0 else (anchors[index - 1].x1 + current.x0) / 2
-    right = staff_x1 - 1 if index == len(anchors) - 1 else (current.x1 + anchors[index + 1].x0) / 2
-    if right - left < 4:
-        left, right = current.x0 - 2, current.x1 + 2
-    return left, right
+def document_size(caps: list[float], settings) -> float:
+    """One type size for the whole score, from what each line could take.
+
+    It cannot be the smallest line's size: a single crowded line would shrink
+    every other line on every page with it. So it is the size all but the most
+    crowded tenth of lines can take at full width. Those few step down to their
+    own size in the drawing pass - which, now that crowding is answered by
+    moving syllables rather than shrinking them, is rare.
+    """
+    if not caps:
+        return settings.max_size
+    ordered = sorted(caps)
+    index = min(int(len(ordered) * UNIFORM_PERCENTILE), len(ordered) - 1)
+    return max(settings.min_size, min(settings.max_size, ordered[index]))
 
 
 def _wrapped_token(score_line, index: int, token: str, total: int) -> str:
@@ -113,7 +131,7 @@ def _wrapped_token(score_line, index: int, token: str, total: int) -> str:
 
 def render(
     score_doc, blank_bytes: bytes, placements, settings: RenderSettings, held=None,
-    nudges=None, marks=None
+    nudges=None, marks=None, layout_out=None
 ) -> bytes:
     """Draw the syllables onto the blank score.
 
@@ -128,6 +146,13 @@ def render(
     ``marks`` maps score-line id -> one state per syllable, 'attention' or
     'resolved', and colours those syllables for proofing on screen. Leave it out
     - as the download always does - and every syllable is drawn plain black.
+
+    ``layout_out``, if given a list, is filled with one record per syllable
+    saying where it was actually drawn. Syllables are moved apart where they
+    would otherwise touch, and a syllable on a held note has no anchor to be
+    found from at all, so this is the only honest source for anything that has
+    to point at a syllable on the page - the click targets in the editor above
+    all, which used to be computed from the anchors and so missed both.
     """
     doc = fitz.open(stream=blank_bytes, filetype="pdf")
     font_path = resolve_font_path(settings.font_choice)
@@ -141,6 +166,18 @@ def render(
     marks = marks or {}
     drawn = 0
 
+    # All the text on one page goes into a single drawing, committed once at
+    # the end. Committing one syllable at a time makes PyMuPDF re-scan the
+    # whole page content stream for every syllable, which on a full score is
+    # most of the time the render takes - and that wait sits between typing a
+    # correction and seeing it.
+    shapes: dict[int, object] = {}
+
+    def shape(page_number):
+        if page_number not in shapes:
+            shapes[page_number] = doc[page_number].new_shape()
+        return shapes[page_number]
+
     def mark_colour(line_id, index):
         states = marks.get(line_id)
         state = states[index] if states and index < len(states) else ""
@@ -152,71 +189,100 @@ def render(
 
     GAP = 1.2  # the clear space left between one syllable and the next
 
-    def uniform_size(seats, x0_limit, x1_limit):
-        """The largest one size at which a whole line of syllables does not collide.
+    def line_capacity(seats, x0_limit, x1_limit):
+        """The largest one size at which a line of syllables fits its staff.
 
-        An engraver sets a line of lyrics at a single size, so the question is
-        not how big each syllable could be on its own but how big they can all
-        be together. Two neighbours clear each other when half of each fits in
-        the space between their notes:
-
-            width(a)/2 + width(b)/2 + gap <= centre(b) - centre(a)
-
-        Every width scales with the size, so each neighbouring pair caps the size
-        directly, and the smallest cap over the line is the answer. Sizing each
-        syllable against the room between its neighbours - as this did - measures
-        the wrong thing twice over: the syllable is drawn centred on its own note,
-        which is not the middle of that room, and the neighbour's own width is
-        never counted at all. Both errors let a syllable overrun at a size that
-        looked like a fit.
+        This asks only whether the whole line fits between the staff edges -
+        every syllable's width, plus a gap between each - because a syllable
+        that crowds its neighbour is moved aside rather than shrunk. It is a far
+        weaker constraint than demanding each syllable sit exactly on its note
+        and clear its neighbours, which is what used to drag a whole line down
+        to 6pt because two long words happened to land on close notes.
         """
-        drawn = [(centre, text) for centre, text in seats if text]
+        drawn = [text for _, text in seats if text]
         if not drawn:
             return settings.max_size
-        natural = [font.text_length(text, fontsize=settings.max_size) for _, text in drawn]
-        size = settings.max_size
+        needed = sum(font.text_length(text, fontsize=settings.max_size) for text in drawn)
+        needed += GAP * (len(drawn) - 1)
+        available = (x1_limit - 1) - (x0_limit + 1)
+        if needed <= 0 or available <= 0:
+            return settings.max_size
+        return max(settings.min_size,
+                   min(settings.max_size, settings.max_size * available / needed))
 
-        def cap(room, needed):
-            nonlocal size
-            if needed > 0:
-                size = min(size, settings.max_size * max(room, 0.5) / needed)
+    def resolve_overlaps(centres, widths, x0_limit, x1_limit):
+        """Move syllables apart until none overlaps, each as little as possible.
 
-        for index in range(len(drawn) - 1):
-            cap(drawn[index + 1][0] - drawn[index][0] - GAP,
-                (natural[index] + natural[index + 1]) / 2.0)
-        # And neither end may run off the staff.
-        cap(drawn[0][0] - (x0_limit + 1), natural[0] / 2.0)
-        cap((x1_limit - 1) - drawn[-1][0], natural[-1] / 2.0)
-        return max(settings.min_size, size)
+        A syllable belongs under its own note, so the placement wanted is the
+        one that keeps every syllable as near its note as it can while leaving
+        no two of them touching. Written out, that is: choose centres x with
 
-    def put(page_number, centre, baseline, text, left, right, hard_left=None,
-            hard_right=None, colour=None, size=None):
-        # `left`/`right` is the room shared with the neighbouring syllables - used
-        # only to choose a size that (usually) avoids collisions. The translated
-        # syllable is then centred exactly on `centre`, which is the centre of the
-        # English syllable it replaces, even when that means slightly overrunning
-        # a tight neighbour gap: matching the English centring is the point, and a
-        # size chosen from `room` keeps that overrun small in practice. Only the
-        # hard page/staff edge - not the inter-syllable room - is allowed to pull
-        # a syllable off-centre, as a last-resort guard against drawing off the page.
+            x[i+1] - x[i]  >=  (width[i] + width[i+1]) / 2 + gap
+
+        minimising the total squared distance from the notes. Subtracting the
+        running minimum separation turns it into fitting a non-decreasing
+        sequence, which pool-adjacent-violators solves exactly in one pass - so
+        a crowded run spreads symmetrically about itself and the syllables
+        either side of it do not move at all.
+
+        This is what an engraver does with a tight bar, and it is the reason the
+        score can now hold one type size throughout: crowding is paid for in a
+        point or two of centring rather than in the size of every other line.
+        """
+        count = len(centres)
+        if count < 2:
+            return list(centres)
+        separations = [(widths[i] + widths[i + 1]) / 2.0 + GAP for i in range(count - 1)]
+        running = [0.0] * count
+        for i in range(1, count):
+            running[i] = running[i - 1] + separations[i - 1]
+
+        # Pool adjacent violators over centre[i] - running[i].
+        blocks: list[list[float]] = []
+        for i in range(count):
+            blocks.append([centres[i] - running[i], 1.0])
+            while len(blocks) > 1 and blocks[-2][0] / blocks[-2][1] > blocks[-1][0] / blocks[-1][1]:
+                total, weight = blocks.pop()
+                blocks[-1][0] += total
+                blocks[-1][1] += weight
+
+        placed: list[float] = []
+        for total, weight in blocks:
+            placed.extend([total / weight] * int(weight))
+        placed = [placed[i] + running[i] for i in range(count)]
+
+        # Then slide the whole line back inside the staff if it has run off an
+        # edge, preferring the left edge when it cannot honour both.
+        overflow_right = (placed[-1] + widths[-1] / 2.0) - (x1_limit - 1)
+        if overflow_right > 0:
+            placed = [x - overflow_right for x in placed]
+        underflow_left = (x0_limit + 1) - (placed[0] - widths[0] / 2.0)
+        if underflow_left > 0:
+            placed = [x + underflow_left for x in placed]
+        return placed
+
+    def put(page_number, centre, baseline, text, hard_left, hard_right,
+            colour=None, size=None):
+        # The translated syllable is centred exactly on `centre`, the centre of
+        # the English syllable it replaces, even when that slightly overruns a
+        # tight neighbour: matching the English centring is the point. Only the
+        # hard staff edge is allowed to pull a syllable off-centre, as a
+        # last-resort guard against drawing off the page.
         #
-        # `size` is settled for the whole line by the caller. An engraver sets a
-        # line of lyrics at one size; sizing each syllable on its own room makes
-        # one long word come out visibly smaller than the words either side of it,
-        # which reads as a mistake even when the syllable is right.
-        if size is None:
-            size = fitted_size(text, left, right)
+        # `size` is settled for the whole document by the caller. An engraver
+        # sets the lyrics of a score at one size; sizing each line on its own
+        # crowding makes one line come out visibly smaller than the line above
+        # it, which reads as a mistake even when every syllable in it is right.
         width = font.text_length(text, fontsize=size)
         x = centre - width / 2
         if hard_left is not None:
             x = min(max(x, hard_left), max(hard_left, hard_right - width))
-        doc[page_number].insert_text(
+        shape(page_number).insert_text(
             (x, baseline),
             text,
             fontname="Lyrics",
             fontsize=size,
             color=colour if colour is not None else settings.colour,
-            overlay=True,
         )
 
     def extender(page_number, x0, x1, baseline):
@@ -240,92 +306,139 @@ def render(
             overlay=True,
         )
 
-    for line in score_doc.lines:
+    def seats_for(line):
+        """Every syllable drawn on one line, left to right.
+
+        A syllable sitting on a held note has no English syllable under it and
+        so appears in none of the English anchors. Gathering both kinds here
+        means the sizing, the drawing and the click targets all work from one
+        list, and a held-note syllable is no longer invisible to any of them.
+
+        Each seat is (centre, text, colour, page, baseline, slot), where `slot`
+        names the syllable for the editor: ("english", n) for one sitting under
+        an English syllable, ("held", n) for one on a held note.
+        """
         tokens = placements.get(line.id)
         extras = held.get(line.id) or []
         if not tokens and not extras:
-            continue
+            return []
+        total = len(tokens or [])
+        seats = [
+            (anchor.placement_x + nudge(line.id, index),
+             _wrapped_token(line, index, token, total),
+             mark_colour(line.id, index),
+             anchor.page,
+             anchor.y + settings.baseline_offset,
+             ("english", index))
+            for index, (anchor, token) in enumerate(zip(line.anchors, tokens or []))
+        ]
+        if extras:
+            # A syllable on a held note has no English syllable of its own, so
+            # it has no state of its own either; it takes the plain colour.
+            seats += [(x, (text or "").strip(), settings.colour,
+                       line.page, line.y + settings.baseline_offset, ("held", n))
+                      for n, (x, text) in enumerate(extras)]
+            seats.sort(key=lambda seat: seat[0])
+        return seats
+
+    def draw_extender(line, size):
+        """One continuous line under the last run of held notes, if it is owed one.
+
+        Intermediate held noteheads can appear in score parsing, but the visible
+        lyric convention is a single line from the preceding syllable to the end
+        of the run.
+        """
         anchors = line.anchors
-        x0_limit, x1_limit = staff_span.get((line.page, line.staff), (40.0, 560.0))
+        if not line.held_notes or not anchors:
+            return
+        extra_x = {round(x, 2) for x, _ in (held.get(line.id) or [])}
+        by_after: dict[int, list[float]] = {}
+        for after_index, x in line.held_notes:
+            by_after.setdefault(after_index, []).append(x)
+        last_after = max(by_after)
+        # A translation that puts its own syllable on those notes needs no line.
+        unoccupied = [x for x in by_after[last_after] if round(x, 2) not in extra_x]
+        if not unoccupied:
+            return
 
-        if not extras:
-            # One size for the whole line, chosen so that none of it collides.
-            line_size = uniform_size(
-                [
-                    (anchor.placement_x + nudge(line.id, index),
-                     _wrapped_token(line, index, token, len(tokens or [])))
-                    for index, (anchor, token) in enumerate(zip(anchors, tokens or []))
-                ],
-                x0_limit, x1_limit,
-            )
-            for index, (anchor, token) in enumerate(zip(anchors, tokens or [])):
-                text = _wrapped_token(line, index, token, len(tokens or []))
-                if not text:
-                    # A note with nothing on it is the one thing colour cannot
-                    # show, because there is no text to colour - and it is the
-                    # most important thing to see. Mark the gap itself.
-                    gap = mark_colour(line.id, index)
-                    if gap is not settings.colour:
-                        vacancy(anchor.page, anchor.placement_x + nudge(line.id, index),
-                                anchor.y + settings.baseline_offset, gap)
-                    continue
-                left, right = _bounds(anchors, index, x0_limit, x1_limit)
-                centre = anchor.placement_x + nudge(line.id, index)
-                put(anchor.page, centre, anchor.y + settings.baseline_offset,
-                    text, left, right, x0_limit, x1_limit,
-                    colour=mark_colour(line.id, index), size=line_size)
-                drawn += 1
+        source_index = min(last_after, len(anchors) - 1)
+        tokens = placements.get(line.id) or []
+        source_text = (tokens[source_index] if source_index < len(tokens) else "").strip()
+        # An extender says "hold this vowel to here", so it belongs only after a
+        # syllable that ends a word. Where the layout hyphenates - "nus-" - the
+        # word carries on to the next note, so the held notes belong to the
+        # syllable that follows and this one is owed no line at all.
+        if not source_text or source_text.endswith("-"):
+            return
+
+        source_x = anchors[source_index].placement_x + nudge(line.id, source_index)
+        start = source_x + font.text_length(source_text, fontsize=size) / 2 + 1.5
+        end = max(unoccupied) - 2.0
+        if end > start + 3:
+            extender(line.page, start, end, line.y + settings.baseline_offset)
+
+    # First pass: the largest size each line could take on its own without
+    # colliding. Nothing is drawn yet, because no line may choose its own size.
+    line_seats: dict[int, list] = {}
+    line_caps: dict[int, float] = {}
+    for line in score_doc.lines:
+        seats = seats_for(line)
+        if not seats:
             continue
+        line_seats[line.id] = seats
+        x0_limit, x1_limit = staff_span.get((line.page, line.staff), (40.0, 560.0))
+        line_caps[line.id] = line_capacity(
+            [(centre, text) for centre, text, _, _, _, _ in seats], x0_limit, x1_limit
+        )
 
-        # With a syllable on a held note, the English word widths no longer say
-        # where the room is: two syllables now share the space one English word
-        # had. Space them by the notes themselves, halfway to each neighbour,
-        # which is what an engraver does.
-        seats = [(anchor.placement_x + nudge(line.id, index),
-                  _wrapped_token(line, index, token, len(tokens or [])),
-                  mark_colour(line.id, index))
-                 for index, (anchor, token) in enumerate(zip(anchors, tokens or []))]
-        # A syllable on a held note has no English syllable of its own, so it has
-        # no state of its own either; it takes the plain colour.
-        seats += [(x, (text or "").strip(), settings.colour) for x, text in extras]
-        seats.sort(key=lambda seat: seat[0])
-        baseline = line.y + settings.baseline_offset
+    document = document_size(list(line_caps.values()), settings)
 
-        def seat_room(index, centre):
-            left = x0_limit + 1 if index == 0 else (seats[index - 1][0] + centre) / 2
-            right = (
-                x1_limit - 1 if index == len(seats) - 1 else (centre + seats[index + 1][0]) / 2
-            )
-            return left + 0.5, right - 0.5
+    # Second pass: draw the whole score at that one size, letting only the most
+    # crowded lines step down, and never far.
+    for line in score_doc.lines:
+        seats = line_seats.get(line.id)
+        if not seats:
+            continue
+        x0_limit, x1_limit = staff_span.get((line.page, line.staff), (40.0, 560.0))
+        # A line only drops below the document size when it could not physically
+        # fit its staff at that size - which, now that crowding is answered by
+        # moving syllables rather than shrinking them, is rare.
+        size = max(min(document, line_caps[line.id]), settings.min_size)
 
-        seat_size = uniform_size([(centre, text) for centre, text, _ in seats],
-                                 x0_limit, x1_limit)
-        for index, (centre, text, colour) in enumerate(seats):
+        # Where two syllables would touch, they are moved apart instead of the
+        # whole line being set smaller: a point or two off-centre reads as
+        # engraving, a line in smaller type reads as a mistake.
+        filled = [seat for seat in seats if seat[1]]
+        widths = [font.text_length(seat[1], fontsize=size) for seat in filled]
+        placed = resolve_overlaps([seat[0] for seat in filled], widths,
+                                  x0_limit, x1_limit)
+        moved = iter(placed)
+
+        for centre, text, colour, page_number, baseline, slot in seats:
             if not text:
+                # A note with nothing on it is the one thing colour cannot show,
+                # because there is no text to colour - and it is the most
+                # important thing to see. Mark the gap itself.
+                if colour is not settings.colour:
+                    vacancy(page_number, centre, baseline, colour)
+                if layout_out is not None:
+                    layout_out.append({"page": page_number, "x": centre, "y": baseline,
+                                       "size": size, "text": "", "line_id": line.id,
+                                       "slot": slot[0], "index": slot[1]})
                 continue
-            left, right = seat_room(index, centre)
-            put(line.page, centre, baseline, text, left, right,
-                x0_limit, x1_limit, colour=colour, size=seat_size)
+            at = next(moved)
+            put(page_number, at, baseline, text, x0_limit, x1_limit,
+                colour=colour, size=size)
+            if layout_out is not None:
+                layout_out.append({"page": page_number, "x": at, "y": baseline,
+                                   "size": size, "text": text, "line_id": line.id,
+                                   "slot": slot[0], "index": slot[1]})
             drawn += 1
 
-        # Draw one continuous lyric extender for the final held-note run.
-        # Intermediate held noteheads can appear in score parsing, but the
-        # visible lyric convention is one line from the preceding syllable to
-        # the end of the run. Stop early if a translation adds a syllable there.
-        if line.held_notes and anchors:
-            extra_x = {round(x, 2) for x, _ in extras}
-            by_after = {}
-            for after_index, x in line.held_notes:
-                by_after.setdefault(after_index, []).append(x)
-            last_after = max(by_after)
-            unoccupied = [x for x in by_after[last_after] if round(x, 2) not in extra_x]
-            if unoccupied:
-                source_index = min(last_after, len(anchors) - 1)
-                source_x = anchors[source_index].placement_x + nudge(line.id, source_index)
-                start = source_x + 3.0
-                end = max(unoccupied) - 2.0
-                if end > start + 3:
-                    extender(line.page, start, end, line.y + settings.baseline_offset)
+        draw_extender(line, size)
+
+    for page_number, page_shape in shapes.items():
+        page_shape.commit(overlay=True)
 
     if not drawn:
         raise ValueError("Nothing was placed - every line was left empty.")

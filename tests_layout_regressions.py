@@ -681,3 +681,213 @@ def test_a_line_is_set_at_one_size_and_nothing_collides():
         f"{len(collisions)} pair(s) of syllables run into each other, worst by "
         f"{max(c[2] for c in collisions)}pt: {collisions[:3]}"
     )
+
+
+# --------------------------------------------------------------------- D21-D24
+#
+# Four defects Hannah found on the Pre-Chorus of Rise Again, all visible in one
+# screenshot: a stray extender line after "nus-", a syllable with no box to
+# click, every line set at a different size, and a wait after every keystroke.
+
+
+def _rendered(song, variant, **kwargs):
+    """Render one corpus case at the app's real settings and hand back the layout."""
+    import pymupdf as fitz
+
+    from smgcore import blankscore, render as render_module
+
+    score_doc, plans = plan_for(song, variant)
+    folder = os.path.join(_test_data(), song, variant)
+    name = next(e for e in os.listdir(folder) if e.lower().startswith("english score"))
+    blank, _ = blankscore.strip_lyrics(open(os.path.join(folder, name), "rb").read(),
+                                       score_doc)
+    placements = {
+        assignment.score_line_id: assignment.tokens
+        for plan in plans.values() for assignment in plan.assignments
+    }
+    held = {
+        assignment.score_line_id: assignment.held
+        for plan in plans.values() for assignment in plan.assignments
+        if assignment.held
+    }
+    settings = render_module.RenderSettings(
+        max_size=(score_doc.lyric_font[1] if score_doc.lyric_font else 11.0),
+        font_choice=list(render_module.BUNDLED_FONTS)[0],
+    )
+    layout = []
+    pdf = render_module.render(score_doc, blank, placements, settings, held=held,
+                               layout_out=layout, **kwargs)
+    return score_doc, plans, placements, held, pdf, layout
+
+
+def test_d21_no_extender_after_a_hyphenated_syllable():
+    """An extender says "hold this vowel to here", so a hyphen forbids it.
+
+    Where the layout hyphenates - "nus-" - the word carries on to the next note,
+    so the held notes belong to the syllable that follows, and a line drawn there
+    tells the singer to hold a vowel the layout has already broken.
+
+    Proved by rendering the same score twice, once as it is and once with those
+    hyphens taken off. Only the hyphen differs, so every extender that appears
+    in the second render and not the first is one the hyphen was suppressing.
+    """
+    import pymupdf as fitz
+
+    from smgcore import blankscore, render as render_module
+
+    score_doc, plans = plan_for("Rise Again", "QUB")
+    folder = os.path.join(_test_data(), "Rise Again", "QUB")
+    name = next(e for e in os.listdir(folder) if e.lower().startswith("english score"))
+    blank, _ = blankscore.strip_lyrics(open(os.path.join(folder, name), "rb").read(),
+                                       score_doc)
+    placements = {
+        assignment.score_line_id: list(assignment.tokens)
+        for plan in plans.values() for assignment in plan.assignments
+    }
+    held = {
+        assignment.score_line_id: assignment.held
+        for plan in plans.values() for assignment in plan.assignments
+        if assignment.held
+    }
+    settings = render_module.RenderSettings(
+        max_size=score_doc.lyric_font[1], font_choice=list(render_module.BUNDLED_FONTS)[0]
+    )
+
+    def horizontal_lines(pdf_bytes):
+        found = set()
+        for page in fitz.open(stream=pdf_bytes, filetype="pdf"):
+            for drawing in page.get_drawings():
+                for item in drawing["items"]:
+                    if item[0] == "l" and abs(item[1].y - item[2].y) < 0.2:
+                        found.add((page.number, round(item[1].y, 1),
+                                   round(min(item[1].x, item[2].x), 1)))
+        return found
+
+    engraved = horizontal_lines(blank)
+    as_written = horizontal_lines(
+        render_module.render(score_doc, blank, placements, settings, held=held)
+    ) - engraved
+
+    # The same score with the hyphen taken off every syllable that owns a held run.
+    opened = {line_id: list(tokens) for line_id, tokens in placements.items()}
+    hyphens = 0
+    for line in score_doc.lines:
+        if not line.held_notes or not line.anchors:
+            continue
+        index = min(max(after for after, _ in line.held_notes), len(line.anchors) - 1)
+        tokens = opened.get(line.id) or []
+        if index < len(tokens) and tokens[index].strip().endswith("-"):
+            tokens[index] = tokens[index].strip().rstrip("-")
+            hyphens += 1
+    assert hyphens, "no held run in this case follows a hyphen - the test proves nothing"
+
+    without = horizontal_lines(
+        render_module.render(score_doc, blank, opened, settings, held=held)
+    ) - engraved
+
+    assert without > as_written, (
+        "taking the hyphens off changed no extender, so the hyphen is not being read"
+    )
+    assert not (as_written - without), (
+        "the hyphenated render drew an extender the un-hyphenated one did not"
+    )
+
+
+def test_d22_held_note_syllables_can_be_clicked():
+    """A syllable on a held note has no anchor, and so used to have no hit area.
+
+    It is drawn on the page like any other, so a person can see it and cannot
+    edit it - the exact complaint. The layout the renderer reports has to name
+    it, because that is what the preview builds its boxes from.
+    """
+    _, _, _, held, _, layout = _rendered("Rise Again", "QUB")
+    assert held, "this case has no held-note syllables - the test proves nothing"
+
+    reported = [item for item in layout if item["slot"] == "held"]
+    expected = sum(1 for seats in held.values() for _, text in seats if (text or "").strip())
+    assert len(reported) >= expected, (
+        f"{expected} syllables sit on held notes but the layout names {len(reported)}"
+    )
+    for item in reported:
+        assert item["text"], "a held-note syllable was reported with no text"
+        assert item["index"] is not None, "a held-note syllable has no place in its run"
+
+
+def test_d23_one_type_size_for_the_whole_score():
+    """Every line at the same size, which is what an engraver does.
+
+    Sizing each line on its own crowding put 6pt lines next to 11pt ones on the
+    same page. Crowding is now answered by moving syllables apart instead.
+    """
+    import collections
+
+    import pymupdf as fitz
+
+    for song, variant in [("Rise Again", "QUB"), ("We Go Preaching", "WY")]:
+        score_doc, _, _, _, pdf, layout = _rendered(song, variant)
+        target = score_doc.lyric_font[1]
+        sizes = collections.Counter(round(item["size"], 2) for item in layout if item["text"])
+        assert sizes, f"{song}/{variant} drew nothing"
+        commonest, count = sizes.most_common(1)[0]
+        assert count / sum(sizes.values()) > 0.98, (
+            f"{song}/{variant} is set at {len(sizes)} different sizes: {dict(sizes)}"
+        )
+        assert abs(commonest - target) < 0.05, (
+            f"{song}/{variant} is set at {commonest}pt but the score sets its own "
+            f"lyrics at {target}pt"
+        )
+
+
+def test_d23_moving_syllables_apart_still_leaves_no_collision():
+    """Uniform size must not be bought with syllables running into each other."""
+    import collections
+
+    import pymupdf as fitz
+
+    for song, variant in [("Rise Again", "QUB"), ("We Go Preaching", "WY")]:
+        _, _, _, _, pdf, _ = _rendered(song, variant)
+        rows = collections.defaultdict(list)
+        for page in fitz.open(stream=pdf, filetype="pdf"):
+            for block in page.get_text("dict")["blocks"]:
+                for line in block.get("lines", []):
+                    for span in line["spans"]:
+                        if span["font"] != "LiberationSerif":
+                            continue
+                        rows[(page.number, round(span["origin"][1], 1))].append(
+                            (span["bbox"][0], span["bbox"][2], span["text"])
+                        )
+        collisions = []
+        for items in rows.values():
+            items.sort()
+            for left, right in zip(items, items[1:]):
+                if right[0] - left[1] < -0.3:
+                    collisions.append((left[2], right[2]))
+        assert not collisions, f"{song}/{variant}: {len(collisions)} collide: {collisions[:3]}"
+
+
+def test_d23_a_crowded_syllable_moves_rather_than_shrinks():
+    """The trade Hannah asked for, stated as a test.
+
+    On the Pre-Chorus line that used to force 6.86pt, the syllables must now be
+    at the score's own size and simply sit a little off their notes.
+    """
+    score_doc, _, placements, _, _, layout = _rendered("Rise Again", "QUB")
+    target = score_doc.lyric_font[1]
+    by_line = {}
+    for item in layout:
+        if item["text"]:
+            by_line.setdefault(item["line_id"], []).append(item)
+
+    moved = 0
+    for line in score_doc.lines:
+        items = by_line.get(line.id)
+        if not items:
+            continue
+        assert all(abs(item["size"] - target) < 0.05 for item in items), (
+            f"line {line.id} was set smaller than the score's own {target}pt"
+        )
+        anchors = {round(a.placement_x, 1) for a in line.anchors}
+        for item in items:
+            if item["slot"] == "english" and round(item["x"], 1) not in anchors:
+                moved += 1
+    assert moved, "no syllable was moved at all - crowding is not being resolved this way"

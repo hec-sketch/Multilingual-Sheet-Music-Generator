@@ -242,17 +242,30 @@ def render_cached(_score_doc, blank: bytes, _placements, _held, _nudges, size, o
     settings = render_mod.RenderSettings(
         max_size=size, baseline_offset=offset, font_choice=font
     )
-    return render_mod.render(_score_doc, blank, _placements, settings, _held, _nudges)
+    layout: list[dict] = []
+    pdf = render_mod.render(_score_doc, blank, _placements, settings, _held, _nudges,
+                            layout_out=layout)
+    return pdf, layout
 
 
 @st.cache_data(show_spinner="Marking what needs a look...", max_entries=3)
 def proof_cached(_score_doc, blank: bytes, _placements, _held, _nudges, _marks,
                  size, offset, font, key):
-    """The same score, coloured for proofing. Never the copy that is downloaded."""
+    """The same score, coloured for proofing. Never the copy that is downloaded.
+
+    Returns the PDF and the list of where every syllable was actually drawn, so
+    the click targets on the preview are taken from the drawing itself rather
+    than guessed from the anchors - which is what left held-note syllables with
+    no box to click and, now that crowded syllables are moved apart, would put
+    every other box slightly beside its syllable.
+    """
     settings = render_mod.RenderSettings(
         max_size=size, baseline_offset=offset, font_choice=font
     )
-    return render_mod.render(_score_doc, blank, _placements, settings, _held, _nudges, _marks)
+    layout: list[dict] = []
+    pdf = render_mod.render(_score_doc, blank, _placements, settings, _held, _nudges,
+                            _marks, layout_out=layout)
+    return pdf, layout
 
 
 def digest(*chunks: bytes) -> str:
@@ -273,6 +286,7 @@ STATE_KEYS = (
     "english_edits",
     "pair_overrides",
     "assign_edits",
+    "held_edits",
     "skip_voices",
     "dropped_layout",
     "layout_editor",
@@ -325,6 +339,7 @@ def seed_state() -> None:
         ("english_edits", {}),
         ("pair_overrides", {}),
         ("assign_edits", {}),
+        ("held_edits", {}),
         ("nudge_edits", {}),
         ("preview_edit_text", {}),
         ("preview_flags", {}),
@@ -342,19 +357,6 @@ seed_state()
 
 
 
-
-def build_assignment_anchor_map(score_doc, plans):
-    """Expose score-anchor coordinates in image space for the final-preview picker."""
-    out = {}
-    for voice_name, voice_plan in plans.items():
-        for assignment in voice_plan.assignments:
-            line = next((ln for ln in score_doc.lines if ln.id == assignment.score_line_id), None)
-            if not line:
-                continue
-            out[(voice_name, assignment.score_line_id)] = [
-                {"x": float(a.placement_x), "y": float(a.y)} for a in line.anchors
-            ]
-    return out
 
 def selected_preview_value(result_pdf: bytes, page_number: int, hotspots: list[dict],
                            selected_key: str | None = None, baseline: float = 5.6):
@@ -470,10 +472,21 @@ with st.sidebar:
 
     st.divider()
     st.header("Type settings")
-    max_size = st.slider("Maximum type size", 4.0, 12.0, 11.0, 0.25, key="max_size")
+    # The scores are engraved with their lyrics in Times at around 9pt, so that
+    # is the size the notes are spaced for. Setting the translation larger than
+    # the English it replaces - or in a wider face - is what forced crowded
+    # lines to shrink to fit, which is why the type used to come out at a
+    # different size on every other line. Start from the score's own size.
+    score_size = None
+    if st.session_state.get("score_lyric_size"):
+        score_size = float(st.session_state["score_lyric_size"])
+    st.session_state.setdefault("max_size", round(score_size or 11.0, 2))
+    max_size = st.slider("Maximum type size", 4.0, 12.0, step=0.25, key="max_size")
+    if score_size:
+        st.caption(f"The score sets its own lyrics at {score_size:g}pt.")
     baseline = st.slider("Distance below staff", 3.0, 14.0, 5.6, 0.1, key="baseline")
     font_choice = st.selectbox(
-        "Font", list(render_mod.BUNDLED_FONTS), index=2, key="font_choice"
+        "Font", list(render_mod.BUNDLED_FONTS), index=0, key="font_choice"
     )
 
     st.divider()
@@ -549,6 +562,12 @@ try:
     score_doc = parse_score_cached(english_bytes)
 except Exception as error:  # noqa: BLE001
     stop_with_a_way_out("File 1, the English score, could not be read.", str(error))
+
+# The size the score sets its own lyrics at is the size the notes are spaced
+# for, so it is where the type settings start. Recorded here because the
+# sidebar is drawn before this point on the next run.
+if score_doc.lyric_font:
+    st.session_state["score_lyric_size"] = float(score_doc.lyric_font[1])
 
 # File 2 is always a grid: the English syllable layout in full, followed by the
 # translated one underneath, page for page, same boxes in the same order.
@@ -632,6 +651,21 @@ def edited_tokens(voice_name: str, assignment) -> list[str]:
     """The syllables for one score line, including anything typed over them."""
     override = st.session_state["assign_edits"].get(f"{voice_name}||{assignment.score_line_id}")
     return override.split() if override is not None else list(assignment.tokens)
+
+
+def edited_held(voice_name: str, assignment) -> list[tuple]:
+    """Syllables sitting on held notes, including anything typed over them.
+
+    These have no English syllable underneath and so are not part of the line's
+    token list; they are stored against their own position in the held run.
+    """
+    held = list(assignment.held or [])
+    edits = st.session_state.get("held_edits", {})
+    out = []
+    for n, (x, text) in enumerate(held):
+        override = edits.get(f"{voice_name}||{assignment.score_line_id}||held{n}")
+        out.append((x, override if override is not None else text))
+    return out
 
 
 def edited_nudges(voice_name: str, assignment, count: int) -> list[float]:
@@ -1276,7 +1310,7 @@ if step == 5:
                 tokens = tokens + [""] * (need - len(tokens))
             placements[assignment.score_line_id] = tokens
             if assignment.held:
-                held_notes[assignment.score_line_id] = list(assignment.held)
+                held_notes[assignment.score_line_id] = edited_held(voice_name, assignment)
 
     extra = sum(len(v) for v in held_notes.values())
     blank = sum(1 for tokens in placements.values() for token in tokens if not token)
@@ -1307,11 +1341,12 @@ if step == 5:
     )
 
     result = None
+    result_layout: list[dict] = []
     if st.session_state.get("has_generated"):
         # Rendering is cached on the type settings, so moving a slider re-renders and the
         # preview follows immediately. Generate does not have to be pressed again.
         try:
-            result = render_cached(
+            result, result_layout = render_cached(
                 score_doc,
                 blank_bytes,
                 placements,
@@ -1343,6 +1378,7 @@ if step == 5:
     # this". This copy is only ever shown on screen; the download above is drawn
     # plain black.
     proof = result
+    proof_layout = result_layout
     if result:
         unsettled_rows = {
             pair.english_id for pair in pairs
@@ -1366,18 +1402,20 @@ if step == 5:
                     marks[assignment.score_line_id] = state
         if marks:
             try:
-                proof = proof_cached(
+                proof, proof_layout = proof_cached(
                     score_doc, blank_bytes, placements, held_notes, nudges, marks,
                     max_size, baseline, font_choice,
                     digest(
                         english_bytes, layout_bytes,
                         json.dumps(placements, sort_keys=True).encode(),
+                        json.dumps(held_notes, sort_keys=True).encode(),
                         json.dumps(nudges, sort_keys=True).encode(),
                         json.dumps({str(k): v for k, v in marks.items()}, sort_keys=True).encode(),
                     ),
                 )
             except Exception:  # noqa: BLE001
-                proof = result  # proofing colour is a convenience, never a blocker
+                # Proofing colour is a convenience, never a blocker.
+                proof, proof_layout = result, result_layout
 
     if result:
         st.markdown(
@@ -1418,7 +1456,6 @@ if step == 5:
             )
 
         st.markdown("**Preview — click a syllable to adjust it directly on the generated score**")
-        assignment_anchor_map = build_assignment_anchor_map(score_doc, plans)
         import pymupdf as fitz
 
         pages = fitz.open(stream=result, filetype="pdf").page_count
@@ -1429,42 +1466,50 @@ if step == 5:
             f"Preview page (1 to {pages})", 1, pages, key="preview_page"
         )
 
-        # Build clickable hotspots from the final score's actual anchors. The image the
-        # user sees and these hit areas come from the same rendered PDF, so selection is
-        # tied to what is on screen rather than to a table row hidden in another step.
-        visible_hotspots = []
+        # Every hit area comes straight from where the renderer actually drew the
+        # syllable. Working back from the anchors instead - as this used to - was
+        # wrong twice over: a syllable on a held note has no anchor at all, so it
+        # got no box and could not be clicked, and a syllable moved aside to
+        # clear its neighbour would have had its box left behind on the note.
+        line_voice = {}
         for voice_name, voice_plan in plans.items():
             for assignment in voice_plan.assignments:
-                if assignment.page + 1 != int(page_pick):
-                    continue
-                tokens = edited_tokens(voice_name, assignment)
-                # The syllable is drawn at the anchor plus whatever it has been
-                # nudged by, so the hit area has to move with it - otherwise the
-                # second nudge selects the syllable next door.
-                shifts = edited_nudges(voice_name, assignment, len(tokens))
-                for idx, anchor in enumerate(assignment_anchor_map.get((voice_name, assignment.score_line_id), [])):
-                    if idx >= len(tokens):
-                        break
-                    text = tokens[idx]
-                    if text == layout_mod.BLANK_BOX:
-                        continue
-                    # An empty note carries no text to click on, and it is the one
-                    # most in need of a person. It gets a hotspot of its own.
-                    label = str(text).strip() or "(no syllable)"
-                    key = f"{voice_name}||{assignment.score_line_id}||{idx}"
-                    visible_hotspots.append({
-                        "key": key,
-                        "x": float(anchor.get("x", 0)) + (shifts[idx] if idx < len(shifts) else 0.0),
-                        "y": float(anchor.get("y", assignment.page_y if hasattr(assignment, 'page_y') else 0)),
-                        "label": label,
-                        "voice": voice_name,
-                        "line_id": assignment.score_line_id,
-                        "index": idx,
-                    })
+                line_voice[assignment.score_line_id] = voice_name
 
+        visible_hotspots = []
+        for drawn in proof_layout:
+            if drawn["page"] + 1 != int(page_pick):
+                continue
+            if drawn["text"] == layout_mod.BLANK_BOX:
+                continue
+            voice_name = line_voice.get(drawn["line_id"])
+            if voice_name is None:
+                continue
+            # An empty note carries no text to click on, and it is the one most
+            # in need of a person. It gets a hotspot of its own.
+            label = str(drawn["text"]).strip() or "(no syllable)"
+            slot, index = drawn["slot"], drawn["index"]
+            key = (f"{voice_name}||{drawn['line_id']}||{index}" if slot == "english"
+                   else f"{voice_name}||{drawn['line_id']}||held{index}")
+            visible_hotspots.append({
+                "key": key,
+                # The layout already carries the baseline the syllable sits on,
+                # so the component must not add its own offset a second time.
+                "x": float(drawn["x"]),
+                "y": float(drawn["y"]),
+                "size": float(drawn["size"]),
+                "label": label,
+                "voice": voice_name,
+                "line_id": drawn["line_id"],
+                "index": index,
+                "slot": slot,
+            })
+
+        # The hotspots already carry the baseline each syllable was drawn on, so
+        # the component is told to add nothing further.
         selected = selected_preview_value(proof, int(page_pick) - 1, visible_hotspots,
                                            st.session_state.get("preview_selected"),
-                                           baseline)
+                                           0.0)
         # Corrections typed onto the score itself. The component sends one of
         # these each time a syllable is committed, nudged, or deliberately left
         # as it stands; `seq` counts them, so the same correction made twice is
@@ -1479,10 +1524,20 @@ if step == 5:
                     voice_name = selected["voice"]
                     line_id = int(selected["line_id"])
                     index = int(selected["index"])
+                    slot = selected.get("slot") or "english"
                     assignment = next(a for a in plans[voice_name].assignments
                                       if a.score_line_id == line_id)
                     row = f"{voice_name}||{line_id}"
-                    if action == "edit":
+                    if slot == "held":
+                        # A syllable on a held note is stored against its place
+                        # in the held run, not against a token index, because it
+                        # has no English syllable underneath it to index by.
+                        if action == "edit":
+                            st.session_state.setdefault("held_edits", {})
+                            st.session_state["held_edits"][f"{row}||held{index}"] = (
+                                selected.get("text", "").strip()
+                            )
+                    elif action == "edit":
                         values = edited_tokens(voice_name, assignment)
                         while len(values) <= index:
                             values.append("")

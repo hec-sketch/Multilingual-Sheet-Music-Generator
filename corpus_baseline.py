@@ -183,9 +183,12 @@ def run_case(case: Case, *, render: bool = True) -> Run:
     error = None
     if render:
         try:
+            # The app's defaults: the score's own lyric size, in a Times-metric
+            # serif, so the translation occupies the space the English did.
             settings = render_mod.RenderSettings(
-                max_size=11.0, baseline_offset=5.6,
-                font_choice=list(render_mod.BUNDLED_FONTS)[2],
+                max_size=(score_doc.lyric_font[1] if score_doc.lyric_font else 11.0),
+                baseline_offset=5.6,
+                font_choice=list(render_mod.BUNDLED_FONTS)[0],
             )
             pdf = render_mod.render(score_doc, blank_bytes, placements, settings,
                                     held_notes, {})
