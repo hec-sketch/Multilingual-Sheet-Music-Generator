@@ -2,9 +2,14 @@
 
 Writes a translated syllable layout under the notes of an engraved vocal score.
 
-The interface is five numbered steps. Each step answers one question, says
+The interface is four numbered steps. Each step answers one question, says
 whether anything needs attention, and lists exactly which rows to look at
 before showing the full editable table.
+
+Words are decided in Step 3, for every voice at once. Step 4 generates the score
+and is where a single syllable is corrected where it sits. Step 3 is the later
+authority of the two: a correction there replaces the note-level ones, because a
+line whose words have changed is no longer the line those were typed against.
 """
 
 from __future__ import annotations
@@ -135,7 +140,7 @@ THEME = f"""
   }}
   [data-testid="stFileUploaderDropzone"]:hover {{ background: {PAPER}; border-color: {INK}; }}
 
-  /* --- The five steps. Each one is a button holding its own state, so the step on
+  /* --- The four steps. Each one is a button holding its own state, so the step on
          screen is remembered and a change made anywhere else does not move it. --- */
   [class*="st-key-step_btn_"] button {{
       width: 100%; justify-content: flex-start !important; align-items: flex-start !important;
@@ -281,19 +286,18 @@ def digest(*chunks: bytes) -> str:
 # exactly what must NOT survive a change of piece: a half-finished edit to row 40
 # of a 52-line layout means nothing to a 23-line one, and a voice picked from the
 # last score may not exist in this one.
-STATE_PREFIXES = ("voice_editor_", "grid_editor_", "pair_editor_", "solo_")
+STATE_PREFIXES = ("grid_editor_", "pair_editor_")
 STATE_KEYS = (
     "layout_edits",
     "english_edits",
     "pair_overrides",
     "assign_edits",
     "assign_base",
+    "edits_replaced",
     "held_edits",
-    "skip_voices",
     "dropped_layout",
     "layout_editor",
     "english_editor",
-    "review_voice",
     "grid_line",
     "result_pdf",
     "has_generated",
@@ -342,13 +346,13 @@ def seed_state() -> None:
         ("pair_round", 0),
         ("assign_edits", {}),
         ("assign_base", {}),
+        ("edits_replaced", 0),
         ("held_edits", {}),
         ("nudge_edits", {}),
         ("preview_edit_text", {}),
         ("preview_flags", {}),
         ("preview_seq", None),
         ("preview_selected", None),
-        ("skip_voices", []),
         ("dropped_layout", set()),
         ("upload_round", 0),
         ("active_step", 1),
@@ -365,7 +369,7 @@ def selected_preview_value(result_pdf: bytes, page_number: int, hotspots: list[d
                            selected_key: str | None = None, baseline: float = 5.6):
     """Render the final PDF page as a clickable image and return the clicked hotspot.
 
-    The component is deliberately used only in Step 5: the image shown is the actual
+    The component is deliberately used only in Step 4: the image shown is the actual
     generated page, and the clickable hotspots are computed from the same score anchors
     used by the renderer. A click therefore selects the exact syllable the user sees.
     """
@@ -395,14 +399,13 @@ STEP_TITLES = [
     "Source files",
     "Syllable layout",
     "Translation",
-    "Note assignment",
-    "Output",
+    "Score",
 ]
 
 
 def step_header(number: int, instruction: str) -> None:
     """Every step opens identically: its number and name, then what to do in it."""
-    st.subheader(f"Step {number} of 5 · {STEP_TITLES[number - 1]}")
+    st.subheader(f"Step {number} of 4 · {STEP_TITLES[number - 1]}")
     st.markdown(
         f'<div style="border-left:3px solid {SLATE};padding:2px 0 2px 12px;'
         f'margin:-4px 0 14px 0;color:{INK};font-size:1.02rem;">{instruction}</div>',
@@ -635,8 +638,11 @@ translation = pairing_mod.translation_map(
     pairs, working_lines, st.session_state["pair_overrides"], english_lines
 )
 
-skip = st.session_state["skip_voices"]
-active_voices = [v for v in score_doc.voices if v not in skip]
+# Every voice printed in a vocal score is a voice that sings it, so every one is
+# given the translation. There was a control here for leaving a voice in English,
+# which nothing in any real score ever wanted; its only use was silencing a staff
+# the app had misread as a voice of its own, and staves are read correctly now.
+active_voices = list(score_doc.voices)
 
 # Now that every English layout line has its translated syllables locked to it,
 # each voice's own line of the score is found among the English layout lines
@@ -660,23 +666,41 @@ def edited_tokens(voice_name: str, assignment) -> list[str]:
     return override.split() if override is not None else list(assignment.tokens)
 
 
-def solo_is_stale(voice_name: str, assignment) -> bool:
-    """Whether Step 3 has moved on since this voice's own words were typed.
+def drop_edits_overtaken_by_step_3() -> None:
+    """Let a Step 3 correction replace the note-level ones typed onto the score.
 
-    Words assigned to one voice alone are meant to differ from the line every
-    other voice sings, so differing from Step 3 is not by itself a problem and
-    must not be treated as one. What matters is Step 3 changing *afterwards*:
-    the line these words were written against is no longer the line in the
-    layout, and this voice is the one place in the score that never heard about
-    it. So the Step 3 words are remembered as they stood when the voice's own
-    were typed, and it is those that are compared - not the two texts, which are
-    supposed to disagree.
+    There is one order of work and the app should hold to it: the words are
+    settled in Step 3, for every voice at once, and the score is where a single
+    syllable is put right where it sits. So a correction typed onto the score is
+    kept against the line as Step 3 then read it, and dropped as soon as Step 3
+    reads differently - the line those words were typed against is not the line
+    any more, and silently keeping them would leave one syllable of the score
+    saying something the layout no longer says.
+
+    Only lines Step 3 has actually changed are touched. Everything typed onto
+    the score elsewhere stands.
     """
-    key = f"{voice_name}||{assignment.score_line_id}"
-    if st.session_state["assign_edits"].get(key) is None:
-        return False
-    typed_against = st.session_state["assign_base"].get(key)
-    return typed_against is not None and typed_against != " ".join(assignment.tokens)
+    replaced = 0
+    for voice_name, voice_plan in plans.items():
+        for assignment in voice_plan.assignments:
+            key = f"{voice_name}||{assignment.score_line_id}"
+            typed_against = st.session_state["assign_base"].get(key)
+            if typed_against is None or typed_against == " ".join(assignment.tokens):
+                continue
+            had = st.session_state["assign_edits"].pop(key, None)
+            st.session_state["assign_base"].pop(key, None)
+            st.session_state["nudge_edits"].pop(key, None)
+            for held in [k for k in st.session_state["held_edits"] if k.startswith(f"{key}||")]:
+                st.session_state["held_edits"].pop(held, None)
+            if had is not None:
+                replaced += 1
+    if replaced:
+        st.session_state["edits_replaced"] = (
+            st.session_state.get("edits_replaced", 0) + replaced
+        )
+
+
+drop_edits_overtaken_by_step_3()
 
 
 def edited_held(voice_name: str, assignment) -> list[tuple]:
@@ -718,7 +742,6 @@ layout_trouble = [
 ]
 pair_trouble = [pair for pair in pairs if pair.status != "ok"]
 mismatched_lines = []
-stale_solos = []
 empty_notes = 0
 for voice_name, voice_plan in plans.items():
     for assignment in voice_plan.assignments:
@@ -727,16 +750,19 @@ for voice_name, voice_plan in plans.items():
         empty_notes += sum(1 for index in range(need) if index >= len(tokens) or not tokens[index])
         if len(tokens) != need:
             mismatched_lines.append((voice_name, assignment, len(tokens), need))
-        if solo_is_stale(voice_name, assignment):
-            stale_solos.append((voice_name, assignment))
 
 score_state = "err" if geometry_problems else ("warn" if score_doc.warnings else "ok")
 layout_state = "warn" if layout_trouble else "ok"
 pair_state = "warn" if pair_trouble else "ok"
-notes_state = "warn" if (mismatched_lines or empty_notes or stale_solos) else "ok"
-ready_state = "ok" if st.session_state.get("has_generated") else "todo"
+# The score step carries what used to be a step of its own: whether every note
+# will be given a syllable. That is a question about the finished score, so it is
+# asked where the score is made rather than one step before it.
+output_state = (
+    "warn" if (mismatched_lines or empty_notes)
+    else ("ok" if st.session_state.get("has_generated") else "todo")
+)
 
-states = [score_state, layout_state, pair_state, notes_state, ready_state]
+states = [score_state, layout_state, pair_state, output_state]
 outstanding = [
     index for index, state in enumerate(states, start=1) if state in ("warn", "err")
 ]
@@ -744,7 +770,7 @@ outstanding = [
 st.markdown(
     f'<p style="color:{SLATE};margin:-4px 0 12px 0;font-size:1.03rem;">'
     "Work through the five steps below. Each one shows whether anything needs your "
-    "attention, and the finished score is produced in Step 5.</p>",
+    "attention, and the finished score is produced in Step 4.</p>",
     unsafe_allow_html=True,
 )
 if outstanding:
@@ -761,7 +787,7 @@ else:
         f'<div class="smg-banner smg-banner--ok">'
         f'<span class="smg-icon">{ICONS["ok"]}</span>'
         "<strong>Nothing needs attention.</strong> Look through the steps if you wish, "
-        "then generate the score in Step 5.</div>",
+        "then generate the score in Step 4.</div>",
         unsafe_allow_html=True,
     )
 
@@ -775,7 +801,7 @@ def go_to_step(number: int) -> None:
 # The step bar is five buttons rather than tabs. A tab strip forgets which tab was
 # open whenever the script reruns, so moving a slider sent the page back to Step 1.
 # The step being viewed is held in session state instead, where nothing else touches it.
-step_columns = st.columns(5, gap="small")
+step_columns = st.columns(4, gap="small")
 for index, state in enumerate(states, start=1):
     with step_columns[index - 1]:
         st.button(
@@ -1003,6 +1029,11 @@ if step == 3:
         f"**{pair_result.confidence:.0%} of lines matched.** "
         "Type over any entry in the **Translation** column to correct it."
     )
+    st.caption(
+        "Finish the words here before correcting anything on the generated score. "
+        "A change here applies to every voice singing the line and replaces any "
+        "correction already typed onto the score for it."
+    )
 
     pair_frame = pd.DataFrame(
         [
@@ -1143,249 +1174,15 @@ if step == 3:
                    else "No voice is currently assigned to this line.")
             )
 
-    next_step_button(3, "Continue to Step 4 · Note assignment")
+    next_step_button(3, "Continue to Step 4 · Score")
 
 
 # --------------------------------------------------------------------------- 4 · Notes
 
+# --------------------------------------------------------------------------- 4 · PDF
+
 if step == 4:
-    step_header(4, "Check the syllables set on each note, one voice at a time.")
-    explicit_blank_boxes = sum(
-        1 for line in english_lines for token in line.tokens if token == layout_mod.BLANK_BOX
-    )
-    if explicit_blank_boxes:
-        st.info(
-            f"The layout contains {explicit_blank_boxes} explicit blank/dash box(es). "
-            "These are real note columns and are counted on both language halves; they are "
-            "not deleted just because no word was printed inside the box."
-        )
-    verdict(
-        len(mismatched_lines) + (1 if empty_notes else 0),
-        "Every note carries a syllable.",
-        f"{empty_notes} note(s) would be left empty. Select the voice below and enter the "
-        "syllables. The PDF can be generated either way.",
-    )
-
-    attention_table(
-        [
-            {
-                "Voice": voice_name,
-                "Page": assignment.page + 1,
-                "Section": assignment.section,
-                "English in the score": assignment.english,
-                "Notes": need,
-                "Syllables given": given,
-            }
-            for voice_name, assignment, given, need in mismatched_lines[:25]
-        ],
-        "Lines to check",
-    )
-    if len(mismatched_lines) > 25:
-        st.caption(f"...and {len(mismatched_lines) - 25} more.")
-
-    # Words assigned to one voice are held by that voice alone, so a Step 3
-    # correction to the same line reaches every other voice and not this one.
-    # That is what was asked for and stays that way; what it must not do is
-    # happen quietly, so the lines Step 3 has since changed are named here.
-    attention_table(
-        [
-            {
-                "Voice": voice_name,
-                "Page": assignment.page + 1,
-                "Section": assignment.section,
-                "English in the score": assignment.english,
-                "This voice sings": st.session_state["assign_edits"].get(
-                    f"{voice_name}||{assignment.score_line_id}", ""
-                ),
-                "Step 3 now": " ".join(assignment.tokens),
-            }
-            for voice_name, assignment in stale_solos[:25]
-        ],
-        "Lines this voice keeps its own words for, where Step 3 has since changed",
-    )
-    if len(stale_solos) > 25:
-        st.caption(f"...and {len(stale_solos) - 25} more.")
-
-    st.markdown("---")
-
-    st.multiselect(
-        "Voices to leave in English",
-        score_doc.voices,
-        key="skip_voices",
-        help="A voice selected here keeps its English and receives no syllables.",
-    )
-
-    if not plans:
-        st.error("Every voice has been left in English. Untick one above to continue.")
-        st.stop()
-
-    st.markdown("**Summary by voice**")
-    st.dataframe(
-        pd.DataFrame(
-            [
-                {
-                    "": ICONS["ok"] if plan.covered == plan.notes_total else ICONS["warn"],
-                    "Voice": plan.voice,
-                    "Lines": plan.total,
-                    "Notes filled": f"{plan.covered} / {plan.notes_total}",
-                    "Coverage": round(plan.coverage * 100),
-                }
-                for plan in plans.values()
-            ]
-        ),
-        hide_index=True,
-        width='stretch',
-        column_config={
-            "": st.column_config.TextColumn(width="small"),
-            "Coverage": st.column_config.ProgressColumn(
-                "Coverage", min_value=0, max_value=100, format="%d%%"
-            ),
-        },
-    )
-
-    st.markdown("---")
-    voice = st.selectbox("Select a voice to review", list(plans), key="review_voice")
-    plan = plans[voice]
-    st.markdown(
-        "**The English printed in the score, beside the syllables set on the same notes.**"
-    )
-    solo = st.checkbox(
-        f"Assign different words to {voice} only",
-        key=f"solo_{voice}",
-        help="Leave this off to correct the words once in Step 3 for every voice that sings "
-        "them. Turn it on only where this voice sings something different.",
-    )
-    if not solo:
-        st.caption(
-            "To change a syllable, go to **Step 3**. The correction is made once and applies "
-            "to every voice singing that line. Use the option above only where this voice sings "
-            "different words."
-        )
-
-    stale_here = [a for a in plan.assignments if solo_is_stale(voice, a)]
-    if stale_here:
-        st.markdown(
-            f'<div class="smg-banner smg-banner--attn">'
-            f'<span class="smg-icon">{ICONS["warn"]}</span>'
-            f"<strong>Step 3 has changed under {len(stale_here)} of this voice's own "
-            f"line{'s' if len(stale_here) != 1 else ''}.</strong> "
-            "They still sing what was typed here, which is what words assigned to one "
-            "voice are for — but the layout has moved on since. The <em>Step 3 now</em> "
-            "column shows what the line reads there. Clear a cell to take that reading, "
-            "or leave it to keep this voice's own.</div>",
-            unsafe_allow_html=True,
-        )
-
-    rows = []
-    for assignment in plan.assignments:
-        key = f"{voice}||{assignment.score_line_id}"
-        override = st.session_state["assign_edits"].get(key)
-        from_step_3 = " ".join(assignment.tokens)
-        text = override if override is not None else from_step_3
-        stale = solo_is_stale(voice, assignment)
-        rows.append(
-            {
-                "": ICONS["adjust"] if stale else (
-                    ICONS["ok"] if len(text.split()) == len(assignment.tokens)
-                    else ICONS["warn"]
-                ),
-                "Page": assignment.page + 1,
-                "Section": assignment.section,
-                "English in the score": assignment.english,
-                "Notes": len(assignment.tokens),
-                "Syllables": text,
-                "Step 3 now": from_step_3 if stale else "",
-                "Nudge (pt)": st.session_state["nudge_edits"].get(key, ""),
-                "On held notes": assignment.held_text,
-                "Sung by": len(
-                    set().union(*(voices_by_layout_line.get(i, set())
-                                  for i in assignment.layout_line_ids))
-                ) if assignment.layout_line_ids else 1,
-                "_key": key,
-                "_base": from_step_3,
-            }
-        )
-    edited_voice = st.data_editor(
-        pd.DataFrame(rows),
-        hide_index=True,
-        width='stretch',
-        height=430,
-        column_config={
-            "": st.column_config.TextColumn(width="small", disabled=True),
-            "Page": st.column_config.NumberColumn(width="small", disabled=True),
-            "Section": st.column_config.TextColumn(width="small", disabled=True),
-            "English in the score": st.column_config.TextColumn(width="large", disabled=True),
-            "Notes": st.column_config.NumberColumn(
-                width="small", disabled=True, help="Notes on this line of the score"
-            ),
-            "Syllables": st.column_config.TextColumn(width="large", disabled=not solo),
-            "Nudge (pt)": st.column_config.TextColumn(
-                width="medium",
-                help="Fine-tune a syllable's position if the automatic placement looks off. "
-                "One number per note, space-separated (e.g. '-2 0 1.5') — negative moves left, "
-                "positive moves right. Leave blank to keep the automatic placement.",
-            ),
-            "On held notes": st.column_config.TextColumn(
-                width="medium",
-                disabled=True,
-                help="Extra syllables the translation sings on notes where the English holds "
-                "one syllable across several. They are placed on those notes in the PDF.",
-            ),
-            "Sung by": st.column_config.NumberColumn(
-                width="small",
-                disabled=True,
-                help="How many voices sing these words. Correcting them on Step 3 changes "
-                "them for all of them at once.",
-            ),
-            "Step 3 now": st.column_config.TextColumn(
-                width="large",
-                disabled=True,
-                help="Filled in only where Step 3 has changed since this voice's own "
-                "words were typed, and showing what the line reads there now. Clear "
-                "the Syllables cell to take it.",
-            ),
-            "_key": None,
-            "_base": None,
-        },
-        key=f"voice_editor_{voice}",
-    )
-    if solo:
-        for _, row in edited_voice.iterrows():
-            typed = row["Syllables"]
-            # Cleared, so this voice stops singing its own words and goes back to
-            # the line everyone else sings - which is how a stale one is taken back.
-            if not str(typed).strip():
-                st.session_state["assign_edits"].pop(row["_key"], None)
-                st.session_state["assign_base"].pop(row["_key"], None)
-                continue
-            st.session_state["assign_edits"][row["_key"]] = typed
-            # What Step 3 read when these words were typed, so that Step 3 changing
-            # afterwards can be told from this voice simply singing something else.
-            st.session_state["assign_base"][row["_key"]] = row["_base"]
-    else:
-        for assignment in plan.assignments:
-            key = f"{voice}||{assignment.score_line_id}"
-            st.session_state["assign_edits"].pop(key, None)
-            st.session_state["assign_base"].pop(key, None)
-    for _, row in edited_voice.iterrows():
-        if str(row["Nudge (pt)"]).strip():
-            st.session_state["nudge_edits"][row["_key"]] = row["Nudge (pt)"]
-        else:
-            st.session_state["nudge_edits"].pop(row["_key"], None)
-
-    unresolved = [a.note for a in plan.assignments if a.note]
-    if unresolved:
-        with st.expander(f"Unresolved items for {voice}", expanded=False):
-            for text in dict.fromkeys(unresolved):
-                st.write("- " + text)
-
-    next_step_button(4, "Continue to Step 5 · Output")
-
-
-# --------------------------------------------------------------------------- 5 · PDF
-
-if step == 5:
-    step_header(5, "Generate the score and download it.")
+    step_header(4, "Generate the score, then correct any syllable where it sits.")
 
     placements: dict[int, list[str]] = {}
     held_notes: dict[int, list[tuple]] = {}
@@ -1428,6 +1225,19 @@ if step == 5:
     blank = sum(1 for tokens in placements.values() for token in tokens if not token)
     total = sum(len(tokens) for tokens in placements.values()) + extra
 
+    replaced = st.session_state.get("edits_replaced", 0)
+    if replaced:
+        st.session_state["edits_replaced"] = 0
+        st.markdown(
+            f'<div class="smg-banner smg-banner--attn">'
+            f'<span class="smg-icon">{ICONS["warn"]}</span>'
+            f"<strong>Step 3 has been changed since the score was corrected, so "
+            f"{replaced} correction(s) made here were replaced.</strong> "
+            "Those lines now read as Step 3 has them. Correct them here again if "
+            "they still need it.</div>",
+            unsafe_allow_html=True,
+        )
+
     left, right = st.columns([1, 2])
     with left:
         st.metric("Notes carrying a syllable", f"{total - blank} of {total}")
@@ -1435,13 +1245,64 @@ if step == 5:
         verdict(
             len(issues),
             "Every note will carry a syllable.",
-            "The score can still be generated, with those notes left empty. Go back to Step 4 "
-            "to fill them in first if you prefer.",
+            "The score can still be generated, with those notes left empty and "
+            "filled in on the score below, or the words completed in Step 3 first.",
         )
 
     attention_table(issues[:15], "Notes that will remain empty")
     if len(issues) > 15:
         st.caption(f"...and {len(issues) - 15} more.")
+
+    # Which voice sings how much, and anything the app could not settle. This was
+    # a step of its own; it is a reading of the score about to be made, so it
+    # belongs beside the button that makes it.
+    with st.expander("Coverage by voice", expanded=bool(mismatched_lines)):
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "": ICONS["ok"] if plan.covered == plan.notes_total else ICONS["warn"],
+                        "Voice": plan.voice,
+                        "Lines": plan.total,
+                        "Notes filled": f"{plan.covered} / {plan.notes_total}",
+                        "Coverage": round(plan.coverage * 100),
+                    }
+                    for plan in plans.values()
+                ]
+            ),
+            hide_index=True,
+            width='stretch',
+            column_config={
+                "": st.column_config.TextColumn(width="small"),
+                "Coverage": st.column_config.ProgressColumn(
+                    "Coverage", min_value=0, max_value=100, format="%d%%"
+                ),
+            },
+        )
+        attention_table(
+            [
+                {
+                    "Voice": voice_name,
+                    "Page": assignment.page + 1,
+                    "Section": assignment.section,
+                    "English in the score": assignment.english,
+                    "Notes": need,
+                    "Syllables given": given,
+                }
+                for voice_name, assignment, given, need in mismatched_lines[:25]
+            ],
+            "Lines where the syllables do not fill the notes",
+        )
+        if len(mismatched_lines) > 25:
+            st.caption(f"...and {len(mismatched_lines) - 25} more.")
+
+        unresolved = dict.fromkeys(
+            a.note for plan in plans.values() for a in plan.assignments if a.note
+        )
+        if unresolved:
+            st.markdown("**Unresolved**")
+            for text in unresolved:
+                st.write("- " + text)
 
     st.markdown("---")
     st.button(
@@ -1579,7 +1440,13 @@ if step == 5:
                 width='stretch',
             )
 
-        st.markdown("**Preview — click a syllable to adjust it directly on the generated score**")
+        st.markdown("**Preview — click a syllable to correct it where it sits**")
+        st.caption(
+            "This is where a single syllable is put right. Anything that applies to "
+            "a whole line, or to every voice singing it, belongs in Step 3 — and a "
+            "change made there afterwards replaces what is typed here, so leave "
+            "this until the words are settled."
+        )
         import pymupdf as fitz
 
         pages = fitz.open(stream=result, filetype="pdf").page_count
@@ -1671,6 +1538,11 @@ if step == 5:
                         values = edited_nudges(voice_name, assignment, len(assignment.tokens))
                         values[index] += float(selected.get("delta") or 0.0)
                         st.session_state["nudge_edits"][row] = " ".join(map(str, values))
+                    # What Step 3 read for this line at the moment it was typed
+                    # over, so that a later change there can be seen for what it
+                    # is and this correction given up to it.
+                    if action in ("edit", "nudge"):
+                        st.session_state["assign_base"][row] = " ".join(assignment.tokens)
                     # "keep" settles the note without changing it: the person has
                     # looked at it and is happy, which is exactly what the green
                     # is for. Every action marks it settled.
