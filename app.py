@@ -2,14 +2,18 @@
 
 Writes a translated syllable layout under the notes of an engraved vocal score.
 
-The interface is four numbered steps. Each step answers one question, says
-whether anything needs attention, and lists exactly which rows to look at
-before showing the full editable table.
+The interface is three numbered steps, and each answers one question.
 
-Words are decided in Step 3, for every voice at once. Step 4 generates the score
-and is where a single syllable is corrected where it sits. Step 3 is the later
-authority of the two: a correction there replaces the note-level ones, because a
-line whose words have changed is no longer the line those were typed against.
+Step 2 is the syllable layout as the app read it, beside the English line each
+row was matched to. Rewriting a row there changes the reading of the document
+itself and the rows are matched up again; selecting a line settles which
+syllable sits on which note, for every voice singing it. Step 3 generates the
+score and is where one syllable is put right where it sits.
+
+They rank in that order, widest first. Rewriting a row lets go of anything
+settled note by note against the old reading of it, and a change in Step 2
+replaces a correction typed onto the score, because a line whose words have
+changed is no longer the line those were typed against.
 """
 
 from __future__ import annotations
@@ -140,7 +144,7 @@ THEME = f"""
   }}
   [data-testid="stFileUploaderDropzone"]:hover {{ background: {PAPER}; border-color: {INK}; }}
 
-  /* --- The four steps. Each one is a button holding its own state, so the step on
+  /* --- The three steps. Each one is a button holding its own state, so the step on
          screen is remembered and a change made anywhere else does not move it. --- */
   [class*="st-key-step_btn_"] button {{
       width: 100%; justify-content: flex-start !important; align-items: flex-start !important;
@@ -369,7 +373,7 @@ def selected_preview_value(result_pdf: bytes, page_number: int, hotspots: list[d
                            selected_key: str | None = None, baseline: float = 5.6):
     """Render the final PDF page as a clickable image and return the clicked hotspot.
 
-    The component is deliberately used only in Step 4: the image shown is the actual
+    The component is deliberately used only in Step 3: the image shown is the actual
     generated page, and the clickable hotspots are computed from the same score anchors
     used by the renderer. A click therefore selects the exact syllable the user sees.
     """
@@ -398,14 +402,13 @@ def selected_preview_value(result_pdf: bytes, page_number: int, hotspots: list[d
 STEP_TITLES = [
     "Source files",
     "Syllable layout",
-    "Translation",
     "Score",
 ]
 
 
 def step_header(number: int, instruction: str) -> None:
     """Every step opens identically: its number and name, then what to do in it."""
-    st.subheader(f"Step {number} of 4 · {STEP_TITLES[number - 1]}")
+    st.subheader(f"Step {number} of 3 · {STEP_TITLES[number - 1]}")
     st.markdown(
         f'<div style="border-left:3px solid {SLATE};padding:2px 0 2px 12px;'
         f'margin:-4px 0 14px 0;color:{INK};font-size:1.02rem;">{instruction}</div>',
@@ -652,7 +655,7 @@ lock = lock_mod.build_lock(english_lines, translation)
 plans = lock_mod.plan_voices(score_doc, lock, active_voices)
 
 # Which voices sing each line of the layout, so a syllable corrected once in
-# Step 3 is corrected for every voice singing it.
+# Step 2 is corrected for every voice singing it.
 voices_by_layout_line: dict[int, set] = {}
 for voice_name, voice_plan in plans.items():
     for assignment in voice_plan.assignments:
@@ -667,17 +670,17 @@ def edited_tokens(voice_name: str, assignment) -> list[str]:
 
 
 def drop_edits_overtaken_by_step_3() -> None:
-    """Let a Step 3 correction replace the note-level ones typed onto the score.
+    """Let a Step 2 correction replace the note-level ones typed onto the score.
 
     There is one order of work and the app should hold to it: the words are
-    settled in Step 3, for every voice at once, and the score is where a single
+    settled in Step 2, for every voice at once, and the score is where a single
     syllable is put right where it sits. So a correction typed onto the score is
-    kept against the line as Step 3 then read it, and dropped as soon as Step 3
+    kept against the line as Step 2 then read it, and dropped as soon as Step 2
     reads differently - the line those words were typed against is not the line
     any more, and silently keeping them would leave one syllable of the score
     saying something the layout no longer says.
 
-    Only lines Step 3 has actually changed are touched. Everything typed onto
+    Only lines Step 2 has actually changed are touched. Everything typed onto
     the score elsewhere stands.
     """
     replaced = 0
@@ -770,7 +773,7 @@ outstanding = [
 st.markdown(
     f'<p style="color:{SLATE};margin:-4px 0 12px 0;font-size:1.03rem;">'
     "Work through the five steps below. Each one shows whether anything needs your "
-    "attention, and the finished score is produced in Step 4.</p>",
+    "attention, and the finished score is produced in Step 3.</p>",
     unsafe_allow_html=True,
 )
 if outstanding:
@@ -787,7 +790,7 @@ else:
         f'<div class="smg-banner smg-banner--ok">'
         f'<span class="smg-icon">{ICONS["ok"]}</span>'
         "<strong>Nothing needs attention.</strong> Look through the steps if you wish, "
-        "then generate the score in Step 4.</div>",
+        "then generate the score in Step 3.</div>",
         unsafe_allow_html=True,
     )
 
@@ -801,7 +804,7 @@ def go_to_step(number: int) -> None:
 # The step bar is five buttons rather than tabs. A tab strip forgets which tab was
 # open whenever the script reruns, so moving a slider sent the page back to Step 1.
 # The step being viewed is held in session state instead, where nothing else touches it.
-step_columns = st.columns(4, gap="small")
+step_columns = st.columns(3, gap="small")
 for index, state in enumerate(states, start=1):
     with step_columns[index - 1]:
         st.button(
@@ -871,127 +874,6 @@ if step == 1:
 
 # --------------------------------------------------------------------------- 2 · Syllables
 
-if step == 2:
-    step_header(2, "Check the syllables read from the translator's document.")
-    verdict(
-        len(layout_trouble),
-        "Every line of the layout was read as a row of syllables.",
-        "The lines below were read as empty. Enter the syllables, or clear Use to omit the line.",
-    )
-    attention_table(
-        [{"Page": line.page + 1, "Section": line.section, "Line": line.text or "(empty)"}
-         for line in layout_trouble],
-        "Lines to check",
-    )
-
-    st.markdown("---")
-    st.markdown(
-        "**One box per note.** Remove the space between two syllables to set them on a "
-        "single note; add a space to separate them again. Clear **Use** to omit a line "
-        "entirely."
-    )
-
-    frame = pd.DataFrame(
-        [
-            {
-                "Use": line.id not in st.session_state["dropped_layout"],
-                "Page": line.page + 1,
-                "Section": line.section,
-                "Tag": line.tag,
-                "Notes": line.note_count,
-                "Syllables": line.text,
-                "Blank": sum(1 for tk in line.tokens if tk == layout_mod.BLANK_BOX) or "",
-                "Joined": "yes" if line.inferred_join else "",
-                "_id": line.id,
-            }
-            for line in editable_lines
-        ]
-    )
-    edited = st.data_editor(
-        frame,
-        hide_index=True,
-        width='stretch',
-        height=420,
-        column_config={
-            "Use": st.column_config.CheckboxColumn(width="small"),
-            "Page": st.column_config.NumberColumn(width="small", disabled=True),
-            "Section": st.column_config.TextColumn(width="small"),
-            "Tag": st.column_config.TextColumn(width="small"),
-            "Notes": st.column_config.NumberColumn(
-                width="small", disabled=True, help="How many notes these syllables cover"
-            ),
-            "Syllables": st.column_config.TextColumn(width="large"),
-            "Blank": st.column_config.TextColumn(
-                width="small",
-                disabled=True,
-                help="Boxes with only a dash in them: notes where a syllable is held rather "
-                "than a new one sung. Written as - in the Syllables column.",
-            ),
-            "Joined": st.column_config.TextColumn(
-                width="small", disabled=True, help="A box in the PDF joined syllables onto one note"
-            ),
-            "_id": None,
-        },
-        key="layout_editor",
-    )
-
-    changed = 0
-    for _, row in edited.iterrows():
-        original = next(l for l in editable_lines if l.id == row["_id"])
-        if row["Syllables"] != original.text:
-            st.session_state["layout_edits"][int(row["_id"])] = row["Syllables"]
-            changed += 1
-        original.section = str(row["Section"] or "")
-        original.tag = str(row["Tag"] or "")
-    st.session_state["dropped_layout"] = {
-        int(r["_id"]) for _, r in edited.iterrows() if not r["Use"]
-    }
-    if changed:
-        st.info(f"{changed} line(s) edited. All later steps use the edited text.")
-
-    if combined_document:
-      with st.expander("Advanced · The English layout as it was read", expanded=False):
-        st.write("Change a line here only if the English was read from the document incorrectly.")
-        english_frame = pd.DataFrame(
-            [
-                {
-                    "Page": line.page + 1,
-                    "Section": line.section,
-                    "Tag": line.tag,
-                    "Notes": line.note_count,
-                    "Syllables": line.text,
-                    "Blank": sum(1 for tk in line.tokens if tk == layout_mod.BLANK_BOX) or "",
-                    "_id": line.id,
-                }
-                for line in english_lines
-            ]
-        )
-        edited_english = st.data_editor(
-            english_frame,
-            hide_index=True,
-            width='stretch',
-            height=320,
-            column_config={
-                "Page": st.column_config.NumberColumn(width="small", disabled=True),
-                "Section": st.column_config.TextColumn(width="small"),
-                "Tag": st.column_config.TextColumn(width="small"),
-                "Notes": st.column_config.NumberColumn(width="small", disabled=True),
-                "Syllables": st.column_config.TextColumn(width="large"),
-                "Blank": st.column_config.TextColumn(width="small", disabled=True),
-                "_id": None,
-            },
-            key="english_editor",
-        )
-        for _, row in edited_english.iterrows():
-            original = next(l for l in english_lines if l.id == row["_id"])
-            if row["Syllables"] != original.text:
-                st.session_state["english_edits"][int(row["_id"])] = row["Syllables"]
-
-    next_step_button(2, "Continue to Step 3 · Translation")
-
-
-# --------------------------------------------------------------------------- 3 · Translation
-
 STATUS_TEXT = {
     "ok": "",
     "count": "counts differ",
@@ -999,112 +881,154 @@ STATUS_TEXT = {
     "translation-only": "no English line",
 }
 
-if step == 3:
-    step_header(3, "Check that each English line is matched with the right translation.")
+
+if step == 2:
+    step_header(
+        2,
+        "Check how the translator's document was read, and the English line each row "
+        "was matched to.",
+    )
     verdict(
-        len(pair_trouble),
-        "Every English line is matched to a translation with the same number of syllables.",
+        len(layout_trouble) + len(pair_trouble),
+        "Every row was read as syllables and matched to an English line of the same length.",
         "Check the rows below. Where the counts differ, put two syllables on one note by "
-        "removing the space between them, or split them by adding a space.",
+        "removing the space between them, or split them by adding a space. Clear Use to "
+        "omit a row entirely.",
     )
     attention_table(
         [
             {
+                "Page": line.page + 1,
+                "Section": line.section,
+                "Row": line.text or "(empty)",
+                "Issue": "read as empty",
+            }
+            for line in layout_trouble
+        ]
+        + [
+            {
+                "Page": "",
                 "Section": pair.section,
-                "English": show_boxes(pair.english_text) or "—",
-                "Notes": pair.english_count,
-                "Translation": show_boxes(pair.translated_text) or "—",
-                "Syllables": pair.translated_count,
-                "Issue": STATUS_TEXT[pair.status],
+                "Row": show_boxes(pair.translated_text) or "—",
+                "Issue": STATUS_TEXT[pair.status]
+                + f" ({pair.english_count} notes, {pair.translated_count} syllables)",
             }
             for pair in pair_trouble
         ],
-        "Lines to check",
+        "Rows to check",
     )
     for note in pair_result.notes:
         st.info(note)
 
     st.markdown("---")
     st.markdown(
-        f"**{pair_result.confidence:.0%} of lines matched.** "
-        "Type over any entry in the **Translation** column to correct it."
+        f"**{pair_result.confidence:.0%} of rows matched.** "
+        "One box per note. Remove the space between two syllables to set them on a single "
+        "note; add a space to separate them again. Clear **Use** to omit a row entirely."
     )
     st.caption(
-        "Finish the words here before correcting anything on the generated score. "
-        "A change here applies to every voice singing the line and replaces any "
-        "correction already typed onto the score for it."
+        "Editing a row here changes how the document was read, so the rows are matched up "
+        "again from scratch — which is how a row split or run together in the PDF is put "
+        "right. To settle which syllable sits on which note, select the line underneath "
+        "instead."
     )
 
-    pair_frame = pd.DataFrame(
+    # One row per line of the translated half, in the order it was written, with the
+    # English line it was matched to beside it. Dropped rows are listed too, greyed by
+    # their own unticked box rather than removed, so that omitting a row can be undone.
+    pair_by_translated = {
+        pair.translated_id: pair for pair in pairs if pair.translated_id is not None
+    }
+    layout_frame = pd.DataFrame(
         [
             {
-                "": ICONS["ok"] if pair.status == "ok" else ICONS["warn"],
-                "Section": pair.section,
-                "Tag": pair.tag,
-                "English": show_boxes(pair.english_text) or "—",
-                "Notes": pair.english_count,
-                "Translation": (
-                    st.session_state["pair_overrides"].get(pair.english_id, pair.translated_text)
-                    if pair.english_id is not None
-                    else pair.translated_text
+                "": (
+                    ICONS["ok"] if pair_by_translated.get(line.id)
+                    and pair_by_translated[line.id].status == "ok" else ICONS["warn"]
                 ),
-                "Syllables": pair.translated_count,
-                "_eid": -1 if pair.english_id is None else pair.english_id,
+                "Use": line.id not in st.session_state["dropped_layout"],
+                "Page": line.page + 1,
+                "Section": line.section,
+                "Tag": line.tag,
+                "English": (
+                    show_boxes(pair_by_translated[line.id].english_text)
+                    if line.id in pair_by_translated else "—"
+                ),
+                "Notes": (
+                    pair_by_translated[line.id].english_count
+                    if line.id in pair_by_translated else 0
+                ),
+                "Syllables": line.text,
+                "Count": line.note_count,
+                "_id": line.id,
             }
-            for pair in pairs
+            for line in editable_lines
         ]
     )
-    edited_pairs = st.data_editor(
-        pair_frame,
+    edited = st.data_editor(
+        layout_frame,
         hide_index=True,
         width='stretch',
         height=460,
         column_config={
             "": st.column_config.TextColumn(width="small", disabled=True),
-            "Section": st.column_config.TextColumn(width="small", disabled=True),
-            "Tag": st.column_config.TextColumn(width="small", disabled=True),
-            "English": st.column_config.TextColumn(width="large", disabled=True),
+            "Use": st.column_config.CheckboxColumn(
+                width="small", help="Clear to leave this row out of the score entirely"
+            ),
+            "Page": st.column_config.NumberColumn(width="small", disabled=True),
+            "Section": st.column_config.TextColumn(width="small"),
+            "Tag": st.column_config.TextColumn(width="small"),
+            "English": st.column_config.TextColumn(
+                width="large",
+                disabled=True,
+                help="The English line this row was matched to. Correct it under Advanced "
+                "below if the English itself was read wrongly.",
+            ),
             "Notes": st.column_config.NumberColumn(
-                width="small", disabled=True, help="Notes this line has in the score"
+                width="small", disabled=True, help="Notes the English line has in the score"
             ),
-            "Translation": st.column_config.TextColumn(width="large"),
-            "Syllables": st.column_config.NumberColumn(
-                width="small", disabled=True, help="Syllables the translator wrote"
+            "Syllables": st.column_config.TextColumn(
+                width="large", help="The row as it was read from the translator's document"
             ),
-            "_eid": None,
+            "Count": st.column_config.NumberColumn(
+                width="small", disabled=True, help="Syllables in this row"
+            ),
+            "_id": None,
         },
-        key=f"pair_editor_{st.session_state['pair_round']}",
+        key="layout_editor",
     )
-    # A correction is taken out of the editor, kept as an override, and the
-    # editor is then started fresh on a table rebuilt around it.
-    #
-    # Both at once is what cannot be done. The editor remembers an edit by row
-    # number and replays it on every rerun, while the table underneath is built
-    # from the overrides - so the same correction is applied twice over, and a
-    # correction that changes a line's syllable count rebuilds the table to a
-    # different shape, leaving the replay pointing at a row that is no longer
-    # the row it was typed into. That is what breaks Step 3 the moment a word is
-    # changed. Counting the key up drops the stale record: the correction is
-    # held in one place only, the overrides, which is where the rest of the app
-    # reads it from.
-    captured = False
-    for _, row in edited_pairs.iterrows():
-        eid = int(row["_eid"])
-        if eid < 0:
-            continue
-        original = next((p for p in pairs if p.english_id == eid), None)
-        if original is None or row["Translation"] == original.translated_text:
-            continue
-        if st.session_state["pair_overrides"].get(eid) != row["Translation"]:
-            st.session_state["pair_overrides"][eid] = row["Translation"]
-            captured = True
-    if captured:
-        st.session_state["pair_round"] += 1
-        st.rerun()
+
+    # A row rewritten here is a different reading of the document, so anything settled
+    # note by note against the old reading is let go with it - the same order of work the
+    # score step keeps to, one level down.
+    changed = 0
+    released = 0
+    for _, row in edited.iterrows():
+        line_id = int(row["_id"])
+        original = next(l for l in editable_lines if l.id == line_id)
+        if row["Syllables"] != original.text:
+            st.session_state["layout_edits"][line_id] = row["Syllables"]
+            changed += 1
+            pair = pair_by_translated.get(line_id)
+            if pair is not None and pair.english_id is not None:
+                if st.session_state["pair_overrides"].pop(pair.english_id, None) is not None:
+                    released += 1
+        original.section = str(row["Section"] or "")
+        original.tag = str(row["Tag"] or "")
+    st.session_state["dropped_layout"] = {
+        int(r["_id"]) for _, r in edited.iterrows() if not r["Use"]
+    }
+    if changed:
+        st.info(
+            f"{changed} row(s) edited; the rows have been matched up again and every later "
+            "step uses the new reading."
+            + (f" {released} line(s) settled note by note were released with them."
+               if released else "")
+        )
 
     # ------------------------------------------------------------------ one line, note by note
     st.markdown("---")
-    st.markdown("**Edit a single line, note by note**")
+    st.markdown("**Select a line to set its syllables note by note**")
     st.write(
         "One row per note, showing the English word set on it. Enter the syllable directly into "
         "the box. Two syllables in one box are sung on that note; an empty box leaves the note "
@@ -1174,15 +1098,49 @@ if step == 3:
                    else "No voice is currently assigned to this line.")
             )
 
-    next_step_button(3, "Continue to Step 4 · Score")
+    if combined_document:
+      with st.expander("Advanced · The English layout as it was read", expanded=False):
+        st.write("Change a line here only if the English was read from the document incorrectly.")
+        english_frame = pd.DataFrame(
+            [
+                {
+                    "Page": line.page + 1,
+                    "Section": line.section,
+                    "Tag": line.tag,
+                    "Notes": line.note_count,
+                    "Syllables": line.text,
+                    "_id": line.id,
+                }
+                for line in english_lines
+            ]
+        )
+        edited_english = st.data_editor(
+            english_frame,
+            hide_index=True,
+            width='stretch',
+            height=320,
+            column_config={
+                "Page": st.column_config.NumberColumn(width="small", disabled=True),
+                "Section": st.column_config.TextColumn(width="small"),
+                "Tag": st.column_config.TextColumn(width="small"),
+                "Notes": st.column_config.NumberColumn(width="small", disabled=True),
+                "Syllables": st.column_config.TextColumn(width="large"),
+                "_id": None,
+            },
+            key="english_editor",
+        )
+        for _, row in edited_english.iterrows():
+            original = next(l for l in english_lines if l.id == row["_id"])
+            if row["Syllables"] != original.text:
+                st.session_state["english_edits"][int(row["_id"])] = row["Syllables"]
+
+    next_step_button(2, "Continue to Step 3 · Score")
 
 
-# --------------------------------------------------------------------------- 4 · Notes
+# --------------------------------------------------------------------------- 3 · PDF
 
-# --------------------------------------------------------------------------- 4 · PDF
-
-if step == 4:
-    step_header(4, "Generate the score, then correct any syllable where it sits.")
+if step == 3:
+    step_header(3, "Generate the score, then correct any syllable where it sits.")
 
     placements: dict[int, list[str]] = {}
     held_notes: dict[int, list[tuple]] = {}
@@ -1231,9 +1189,9 @@ if step == 4:
         st.markdown(
             f'<div class="smg-banner smg-banner--attn">'
             f'<span class="smg-icon">{ICONS["warn"]}</span>'
-            f"<strong>Step 3 has been changed since the score was corrected, so "
+            f"<strong>Step 2 has been changed since the score was corrected, so "
             f"{replaced} correction(s) made here were replaced.</strong> "
-            "Those lines now read as Step 3 has them. Correct them here again if "
+            "Those lines now read as Step 2 has them. Correct them here again if "
             "they still need it.</div>",
             unsafe_allow_html=True,
         )
@@ -1246,7 +1204,7 @@ if step == 4:
             len(issues),
             "Every note will carry a syllable.",
             "The score can still be generated, with those notes left empty and "
-            "filled in on the score below, or the words completed in Step 3 first.",
+            "filled in on the score below, or the words completed in Step 2 first.",
         )
 
     attention_table(issues[:15], "Notes that will remain empty")
@@ -1443,7 +1401,7 @@ if step == 4:
         st.markdown("**Preview — click a syllable to correct it where it sits**")
         st.caption(
             "This is where a single syllable is put right. Anything that applies to "
-            "a whole line, or to every voice singing it, belongs in Step 3 — and a "
+            "a whole line, or to every voice singing it, belongs in Step 2 — and a "
             "change made there afterwards replaces what is typed here, so leave "
             "this until the words are settled."
         )
@@ -1538,7 +1496,7 @@ if step == 4:
                         values = edited_nudges(voice_name, assignment, len(assignment.tokens))
                         values[index] += float(selected.get("delta") or 0.0)
                         st.session_state["nudge_edits"][row] = " ".join(map(str, values))
-                    # What Step 3 read for this line at the moment it was typed
+                    # What Step 2 read for this line at the moment it was typed
                     # over, so that a later change there can be seen for what it
                     # is and this correction given up to it.
                     if action in ("edit", "nudge"):
