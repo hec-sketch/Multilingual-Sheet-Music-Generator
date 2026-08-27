@@ -245,6 +245,16 @@ def render_cached(_score_doc, blank: bytes, _placements, _held, _nudges, size, o
     return render_mod.render(_score_doc, blank, _placements, settings, _held, _nudges)
 
 
+@st.cache_data(show_spinner="Marking what needs a look...", max_entries=3)
+def proof_cached(_score_doc, blank: bytes, _placements, _held, _nudges, _marks,
+                 size, offset, font, key):
+    """The same score, coloured for proofing. Never the copy that is downloaded."""
+    settings = render_mod.RenderSettings(
+        max_size=size, baseline_offset=offset, font_choice=font
+    )
+    return render_mod.render(_score_doc, blank, _placements, settings, _held, _nudges, _marks)
+
+
 def digest(*chunks: bytes) -> str:
     hasher = hashlib.sha256()
     for chunk in chunks:
@@ -1324,6 +1334,48 @@ if step == 5:
             )
         st.session_state["result_pdf"] = result
 
+    # The proofing copy: the same score with every note the app was unsure about
+    # in red, and everything settled since in green. A note left deliberately as
+    # it stands keeps its red, so "I chose this" never looks like "I never saw
+    # this". This copy is only ever shown on screen; the download above is drawn
+    # plain black.
+    proof = result
+    if result:
+        unsettled_rows = {
+            pair.english_id for pair in pairs
+            if pair.status != "ok" and pair.english_id is not None
+        }
+        resolved_notes = {
+            (int(key.split("||")[1]), int(key.split("||")[2]))
+            for key, state in st.session_state["preview_flags"].items()
+            if state == "resolved" and key.count("||") == 2
+        }
+        marks: dict[int, list[str]] = {}
+        for voice_name, voice_plan in plans.items():
+            for assignment in voice_plan.assignments:
+                state = lock_mod.attention_marks(
+                    assignment,
+                    placements.get(assignment.score_line_id, []),
+                    resolved_notes,
+                    unsettled_rows,
+                )
+                if any(state):
+                    marks[assignment.score_line_id] = state
+        if marks:
+            try:
+                proof = proof_cached(
+                    score_doc, blank_bytes, placements, held_notes, nudges, marks,
+                    max_size, baseline, font_choice,
+                    digest(
+                        english_bytes, layout_bytes,
+                        json.dumps(placements, sort_keys=True).encode(),
+                        json.dumps(nudges, sort_keys=True).encode(),
+                        json.dumps({str(k): v for k, v in marks.items()}, sort_keys=True).encode(),
+                    ),
+                )
+            except Exception:  # noqa: BLE001
+                proof = result  # proofing colour is a convenience, never a blocker
+
     if result:
         st.markdown(
             f'<div class="smg-banner smg-banner--ok">'
@@ -1387,20 +1439,23 @@ if step == 5:
                     if idx >= len(tokens):
                         break
                     text = tokens[idx]
-                    if not str(text).strip() or text == layout_mod.BLANK_BOX:
+                    if text == layout_mod.BLANK_BOX:
                         continue
+                    # An empty note carries no text to click on, and it is the one
+                    # most in need of a person. It gets a hotspot of its own.
+                    label = str(text).strip() or "(no syllable)"
                     key = f"{voice_name}||{assignment.score_line_id}||{idx}"
                     visible_hotspots.append({
                         "key": key,
                         "x": float(anchor.get("x", 0)),
                         "y": float(anchor.get("y", assignment.page_y if hasattr(assignment, 'page_y') else 0)),
-                        "label": str(text),
+                        "label": label,
                         "voice": voice_name,
                         "line_id": assignment.score_line_id,
                         "index": idx,
                     })
 
-        selected = selected_preview_value(result, int(page_pick) - 1, visible_hotspots,
+        selected = selected_preview_value(proof, int(page_pick) - 1, visible_hotspots,
                                            st.session_state.get("preview_selected"))
         if selected and selected.get("key"):
             st.session_state["preview_selected"] = selected["key"]
@@ -1472,4 +1527,11 @@ if step == 5:
                 st.session_state["preview_selected"] = None
                 st.warning("That preview selection is no longer available; please click the syllable again.")
 
-        st.caption("Click a syllable on the score. Use the arrows for a nudge, edit the text, then save. Corrected items show ✓ instead of !.")
+        st.caption(
+            "**Red** is a note the app was unsure about — a gap it could not fill, or a "
+            "line it only partly recognised. Click it to retype the syllable or nudge it "
+            "sideways, and it turns **green**. Anything you look at and decide to leave "
+            "as it stands keeps its red, so you can always tell what you have been "
+            "through from what you have not. The colour is only here on screen — the "
+            "downloaded score is plain black."
+        )

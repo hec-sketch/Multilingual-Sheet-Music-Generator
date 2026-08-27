@@ -539,3 +539,44 @@ def plan_voices(score_doc, lock: Lock, voices) -> dict[str, VoicePlan]:
         for voice in voices
         if grouped.get(voice)
     }
+
+
+# --------------------------------------------------------------------------- proofing
+
+ATTENTION = "attention"
+RESOLVED = "resolved"
+
+
+def attention_marks(assignment, tokens, resolved=None, unsettled_rows=None) -> list[str]:
+    """Which notes of one score line have not been settled, one state per note.
+
+    The app cannot know where it differs from a score somebody would set by hand -
+    if it knew that, it would have set it that way. What it does know is where it
+    was unsure, and that is what is worth a person's eyes:
+
+    * a note it could not put a syllable on at all;
+    * a line whose English it only partly recognised, where every syllable on the
+      line is suspect rather than just one;
+    * a line drawing on a written row where the two languages disagreed about how
+      many syllables there are.
+
+    ``resolved`` is the set of (score line id, note index) a person has already
+    settled. Those go green. Everything a person has looked at and deliberately
+    left alone stays red, because "I chose this" and "I never saw this" must not
+    look the same on the page.
+    """
+    resolved = resolved or set()
+    unsettled_rows = unsettled_rows or set()
+    suspect_line = (
+        assignment.status != "ok"
+        or any(row in unsettled_rows for row in assignment.layout_line_ids)
+    )
+    out: list[str] = []
+    for index, token in enumerate(tokens):
+        if (assignment.score_line_id, index) in resolved:
+            out.append(RESOLVED)
+        elif not token or suspect_line:
+            out.append(ATTENTION)
+        else:
+            out.append("")
+    return out

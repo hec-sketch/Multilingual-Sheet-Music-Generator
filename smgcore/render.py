@@ -22,6 +22,16 @@ SYSTEM_FALLBACKS = [
 ]
 
 
+# Proofing colours. These are for the copy shown in the app while the score is
+# being checked - never for the copy that is downloaded, which is always plain
+# black. Red says "this note has not been looked at"; green says "somebody has
+# been here and settled it". A note deliberately left as it stands keeps its red,
+# because "I chose this" and "I never saw this" must not look the same.
+ATTENTION = (0.70, 0.13, 0.13)
+RESOLVED = (0.11, 0.45, 0.20)
+MARK_COLOURS = {"attention": ATTENTION, "resolved": RESOLVED}
+
+
 @dataclass
 class RenderSettings:
     max_size: float = 11.0
@@ -102,7 +112,8 @@ def _wrapped_token(score_line, index: int, token: str, total: int) -> str:
 
 
 def render(
-    score_doc, blank_bytes: bytes, placements, settings: RenderSettings, held=None, nudges=None
+    score_doc, blank_bytes: bytes, placements, settings: RenderSettings, held=None,
+    nudges=None, marks=None
 ) -> bytes:
     """Draw the syllables onto the blank score.
 
@@ -113,6 +124,10 @@ def render(
     ``nudges`` maps score-line id -> one horizontal offset in points per printed
     English syllable, for hand-adjusting a placement the automatic centring gets
     wrong. A positive value moves a syllable right, negative moves it left.
+
+    ``marks`` maps score-line id -> one state per syllable, 'attention' or
+    'resolved', and colours those syllables for proofing on screen. Leave it out
+    - as the download always does - and every syllable is drawn plain black.
     """
     doc = fitz.open(stream=blank_bytes, filetype="pdf")
     font_path = resolve_font_path(settings.font_choice)
@@ -123,13 +138,20 @@ def render(
     staff_span = {(s.page, s.index): (s.x0, s.x1) for s in score_doc.staves}
     held = held or {}
     nudges = nudges or {}
+    marks = marks or {}
     drawn = 0
+
+    def mark_colour(line_id, index):
+        states = marks.get(line_id)
+        state = states[index] if states and index < len(states) else ""
+        return MARK_COLOURS.get(state, settings.colour)
 
     def nudge(line_id, index):
         shifts = nudges.get(line_id)
         return shifts[index] if shifts and index < len(shifts) else 0.0
 
-    def put(page_number, centre, baseline, text, left, right, hard_left=None, hard_right=None):
+    def put(page_number, centre, baseline, text, left, right, hard_left=None,
+            hard_right=None, colour=None):
         # `left`/`right` is the room shared with the neighbouring syllables - used
         # only to choose a size that (usually) avoids collisions. The translated
         # syllable is then centred exactly on `centre`, which is the centre of the
@@ -154,7 +176,7 @@ def render(
             text,
             fontname="Lyrics",
             fontsize=size,
-            color=settings.colour,
+            color=colour if colour is not None else settings.colour,
             overlay=True,
         )
 
@@ -166,6 +188,16 @@ def render(
             fitz.Point(x1, baseline + 1.0),
             color=settings.colour,
             width=0.45,
+            overlay=True,
+        )
+
+    def vacancy(page_number, centre, baseline, colour):
+        """Show a note that was left with no syllable at all."""
+        doc[page_number].draw_line(
+            fitz.Point(centre - 2.6, baseline),
+            fitz.Point(centre + 2.6, baseline),
+            color=colour,
+            width=1.1,
             overlay=True,
         )
 
@@ -181,11 +213,19 @@ def render(
             for index, (anchor, token) in enumerate(zip(anchors, tokens or [])):
                 text = _wrapped_token(line, index, token, len(tokens or []))
                 if not text:
+                    # A note with nothing on it is the one thing colour cannot
+                    # show, because there is no text to colour - and it is the
+                    # most important thing to see. Mark the gap itself.
+                    gap = mark_colour(line.id, index)
+                    if gap is not settings.colour:
+                        vacancy(anchor.page, anchor.placement_x + nudge(line.id, index),
+                                anchor.y + settings.baseline_offset, gap)
                     continue
                 left, right = _bounds(anchors, index, x0_limit, x1_limit)
                 centre = anchor.placement_x + nudge(line.id, index)
                 put(anchor.page, centre, anchor.y + settings.baseline_offset,
-                    text, left, right, x0_limit, x1_limit)
+                    text, left, right, x0_limit, x1_limit,
+                    colour=mark_colour(line.id, index))
                 drawn += 1
             continue
 
@@ -194,19 +234,23 @@ def render(
         # had. Space them by the notes themselves, halfway to each neighbour,
         # which is what an engraver does.
         seats = [(anchor.placement_x + nudge(line.id, index),
-                  _wrapped_token(line, index, token, len(tokens or [])))
+                  _wrapped_token(line, index, token, len(tokens or [])),
+                  mark_colour(line.id, index))
                  for index, (anchor, token) in enumerate(zip(anchors, tokens or []))]
-        seats += [(x, (text or "").strip()) for x, text in extras]
-        seats.sort()
+        # A syllable on a held note has no English syllable of its own, so it has
+        # no state of its own either; it takes the plain colour.
+        seats += [(x, (text or "").strip(), settings.colour) for x, text in extras]
+        seats.sort(key=lambda seat: seat[0])
         baseline = line.y + settings.baseline_offset
-        for index, (centre, text) in enumerate(seats):
+        for index, (centre, text, colour) in enumerate(seats):
             if not text:
                 continue
             left = x0_limit + 1 if index == 0 else (seats[index - 1][0] + centre) / 2
             right = (
                 x1_limit - 1 if index == len(seats) - 1 else (centre + seats[index + 1][0]) / 2
             )
-            put(line.page, centre, baseline, text, left + 0.5, right - 0.5, x0_limit, x1_limit)
+            put(line.page, centre, baseline, text, left + 0.5, right - 0.5,
+                x0_limit, x1_limit, colour=colour)
             drawn += 1
 
         # Draw one continuous lyric extender for the final held-note run.

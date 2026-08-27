@@ -80,7 +80,7 @@ def discover_cases() -> list[Case]:
                 low = entry.lower()
                 if low.startswith("english score"):
                     score = path
-                elif low.startswith("syllabus layout"):
+                elif low.startswith("syllabus layout") or low.startswith("syllablelayout"):
                     layout = path
                 else:
                     # the answer key: "Key_XX_osg_..." or "XX_osg_..."
@@ -283,6 +283,17 @@ def compare(output_pdf: bytes, key_pdf: bytes, blank_pdf: bytes) -> dict:
             pair_of[k] = o
             taken.add(o)
 
+    # The song's title. It is printed at the top of the key and exists in neither
+    # half of any layout, so nothing in the inputs can produce it. Reported, never
+    # counted against the reading.
+    title = None
+    first_page = [key for key in key_rows if key[0] == 0]
+    if first_page:
+        top = min(first_page, key=lambda key: key[1])
+        if top not in pair_of:
+            title = {"y": top[1], "text": _row_text(key_rows[top])}
+            key_rows = {k: v for k, v in key_rows.items() if k != top}
+
     identical = 0
     differing: list[dict] = []
     missing: list[dict] = []
@@ -317,6 +328,7 @@ def compare(output_pdf: bytes, key_pdf: bytes, blank_pdf: bytes) -> dict:
     ]
 
     return {
+        "title_not_counted": title,
         "key_rows": len(key_rows),
         "out_rows": len(out_rows),
         "identical": identical,
