@@ -25,7 +25,6 @@ from smgcore import lock as lock_mod
 from smgcore import pairing as pairing_mod
 from smgcore import render as render_mod
 from smgcore import score as score_mod
-from smgcore import spelling as spelling_mod
 
 st.set_page_config(page_title="Multi-lingual Sheet Music Generator", page_icon="♪", layout="wide")
 
@@ -300,8 +299,6 @@ STATE_KEYS = (
     "has_generated",
     "preview_page",
     "active_step",
-    "spelling_map",
-    "spelling_editor",
 )
 # Kept while the piece is being worked on and cleared only by "Start a new project".
 SESSION_KEYS = ("reference_audio", "max_size", "baseline", "font_choice")
@@ -353,8 +350,6 @@ def seed_state() -> None:
         ("dropped_layout", set()),
         ("upload_round", 0),
         ("active_step", 1),
-        ("spelling_map", ""),
-        ("spelling_editor", ""),
     ]:
         st.session_state.setdefault(key, default)
 
@@ -618,15 +613,10 @@ if not combined_document:
         "(so the same number of pages of each). Only one language was found.",
     )
 
-# Some layouts are typed with a tool that cannot produce the language's own
-# letters - Acrobat's typewriter under WinAnsiEncoding has no `ʉ` in it, so the
-# translation comes through as `bu` for `bʉ` and `jen` for `jẽ`. The characters
-# are not in the file in any form, so they cannot be recovered and must not be
-# guessed at; the correspondence is supplied once, on Step 3, and applied here
-# before anything else reads the words.
-spelling_map = spelling_mod.parse(st.session_state.get("spelling_map", ""))
-spelling_mod.apply_to_lines(editable_lines, spelling_map)
-
+# The syllable layout is the score's source of truth: what is typed in it is
+# what is sung. A layout that cannot type the language's own letters needs to be
+# retyped with them, not patched afterwards - so nothing here corrects spelling
+# the layout got wrong.
 working_lines = [
     line for line in editable_lines if line.id not in st.session_state["dropped_layout"]
 ]
@@ -983,53 +973,6 @@ if step == 3:
     )
     for note in pair_result.notes:
         st.info(note)
-
-    # Spelling. Some layouts are typed with a tool that cannot produce the
-    # language's own letters, so the translation arrives in a plain spelling -
-    # `bu` for `bʉ`, `jen` for `jẽ`. Those characters are not in the file in any
-    # form and the app must not invent them; the correspondence is given here
-    # once and applied to every cell in the score.
-    with st.expander("Spelling — if the layout was typed without the language's letters"):
-        st.markdown(
-            "Some layouts are typed with a tool that cannot produce every letter "
-            "the language uses, so a syllable arrives spelt plainly. Write the "
-            "correspondence here, one a line, as **`as typed -> as it reads`**:"
-        )
-        st.code("bu -> bʉ\nkrin -> krĩ\nun -> ũ", language=None)
-        shipped = spelling_mod.available()
-        if shipped:
-            pick, load = st.columns([2, 1])
-            chosen = pick.selectbox(
-                "Language",
-                list(shipped),
-                key="spelling_choice",
-                label_visibility="collapsed",
-                help="The maps written so far. Loading one fills the box below, "
-                     "where it can still be edited before it is applied.",
-            )
-            if load.button("Load map", key="load_spelling"):
-                st.session_state["spelling_editor"] = spelling_mod.load(chosen)
-                st.session_state["spelling_map"] = st.session_state["spelling_editor"]
-                st.rerun()
-        st.text_area(
-            "Spelling corrections",
-            key="spelling_editor",
-            height=160,
-            label_visibility="collapsed",
-            help="Matching ignores capitals and any punctuation printed around a "
-                 "syllable. A map is per language, so one written for a language "
-                 "corrects every layout in it that follows.",
-        )
-        left, right = st.columns([1, 2])
-        if left.button("Apply spelling", key="apply_spelling"):
-            st.session_state["spelling_map"] = st.session_state.get("spelling_editor", "")
-            st.rerun()
-        if spelling_map:
-            right.markdown(
-                f"**{len(spelling_map)} correction(s) in use.** "
-                "The score, the table below and the checking sheet all show the "
-                "corrected spelling."
-            )
 
     st.markdown("---")
     st.markdown(
