@@ -307,15 +307,29 @@ def _canonical_label(raw: str) -> str:
 
 
 def read_staff_labels(page, staves: list[Staff]) -> None:
-    """Read the instrument/voice name printed in the left margin of each staff."""
+    """Read the instrument/voice name printed in the left margin of each staff.
+
+    Each staff's label is measured against that staff's own left edge, not
+    against one margin taken across the page. Engravers indent the first system
+    of a score to leave room for the voice names written out in full, so its
+    staves start further right than every system below them - in More Than
+    Sparrows by about fifty points. A single page-wide margin is the narrowest
+    of those, which puts the first system's own labels to the *right* of it and
+    throws them away: that staff came through unnamed, was called `Voice 1`, and
+    the first line of the song went to a voice of its own. Every later line of
+    the real voice then sat one line further down the page than the singer's
+    words, which is visible in Step 4 as a score that starts on the second line.
+    """
     if not staves:
         return
-    margin = min(s.x0 for s in staves)
-    words = [w for w in page.get_text("words") if w[2] < margin - 1]
+    words = page.get_text("words")
     for staff in staves:
         band_top = staff.top - (staff.bottom - staff.top) * 1.1
         band_bottom = staff.bottom + (staff.bottom - staff.top) * 1.1
-        picked = [w for w in words if band_top <= (w[1] + w[3]) / 2 <= band_bottom]
+        picked = [
+            w for w in words
+            if w[2] < staff.x0 - 1 and band_top <= (w[1] + w[3]) / 2 <= band_bottom
+        ]
         picked.sort(key=lambda w: (round(w[1], 1), w[0]))
         staff.label_raw = normalize_spacing(" ".join(w[4] for w in picked))
 

@@ -281,7 +281,7 @@ def digest(*chunks: bytes) -> str:
 # exactly what must NOT survive a change of piece: a half-finished edit to row 40
 # of a 52-line layout means nothing to a 23-line one, and a voice picked from the
 # last score may not exist in this one.
-STATE_PREFIXES = ("voice_editor_", "grid_editor_", "solo_")
+STATE_PREFIXES = ("voice_editor_", "grid_editor_", "pair_editor_", "solo_")
 STATE_KEYS = (
     "layout_edits",
     "english_edits",
@@ -292,7 +292,6 @@ STATE_KEYS = (
     "dropped_layout",
     "layout_editor",
     "english_editor",
-    "pair_editor",
     "review_voice",
     "grid_line",
     "result_pdf",
@@ -339,6 +338,7 @@ def seed_state() -> None:
         ("layout_edits", {}),
         ("english_edits", {}),
         ("pair_overrides", {}),
+        ("pair_round", 0),
         ("assign_edits", {}),
         ("held_edits", {}),
         ("nudge_edits", {}),
@@ -1018,15 +1018,34 @@ if step == 3:
             ),
             "_eid": None,
         },
-        key="pair_editor",
+        key=f"pair_editor_{st.session_state['pair_round']}",
     )
+    # A correction is taken out of the editor, kept as an override, and the
+    # editor is then started fresh on a table rebuilt around it.
+    #
+    # Both at once is what cannot be done. The editor remembers an edit by row
+    # number and replays it on every rerun, while the table underneath is built
+    # from the overrides - so the same correction is applied twice over, and a
+    # correction that changes a line's syllable count rebuilds the table to a
+    # different shape, leaving the replay pointing at a row that is no longer
+    # the row it was typed into. That is what breaks Step 3 the moment a word is
+    # changed. Counting the key up drops the stale record: the correction is
+    # held in one place only, the overrides, which is where the rest of the app
+    # reads it from.
+    captured = False
     for _, row in edited_pairs.iterrows():
         eid = int(row["_eid"])
         if eid < 0:
             continue
         original = next((p for p in pairs if p.english_id == eid), None)
-        if original is not None and row["Translation"] != original.translated_text:
+        if original is None or row["Translation"] == original.translated_text:
+            continue
+        if st.session_state["pair_overrides"].get(eid) != row["Translation"]:
             st.session_state["pair_overrides"][eid] = row["Translation"]
+            captured = True
+    if captured:
+        st.session_state["pair_round"] += 1
+        st.rerun()
 
     # ------------------------------------------------------------------ one line, note by note
     st.markdown("---")

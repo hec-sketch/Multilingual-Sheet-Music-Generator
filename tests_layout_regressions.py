@@ -1176,3 +1176,50 @@ def test_d27_the_corpus_orthography_is_all_drawable():
         f"the corpus orthography reported a shortfall: {chain.shortfall()}"
     )
 
+
+
+# ------------------------------------------------------------------------- D31
+#
+# The first system of a score is indented, to leave room for the voice names
+# written out in full beside it. Every system below it starts further left.
+#
+# Staff labels were read against one margin measured across the whole page,
+# which is the narrowest of those - so the first system's own labels, printed in
+# the gap between the two, fell on the wrong side of it and were thrown away.
+# That staff came through unnamed and was called `Voice 1`, taking the first
+# line of the song with it, and the real voice's plan began on the second line
+# of the score: what Step 4 showed as a song starting in the middle of its own
+# first sentence.
+# ---------------------------------------------------------------------------
+
+
+def test_d31_an_indented_first_system_is_named_from_its_own_margin():
+    """A staff set further right than the rest still gets to keep its name."""
+    path = os.path.join(_test_data(), "More Than Sparrows", "WY",
+                        "English Score_jwb-140_More Than Sparrows_Full Score.PDF")
+    score_doc = score_mod.parse_score(open(path, "rb").read())
+
+    first = min((s for s in score_doc.staves if s.page == 0), key=lambda s: s.top)
+    rest = [s for s in score_doc.staves if s.page == 0 and s is not first]
+    assert first.x0 > min(s.x0 for s in rest) + 10, (
+        "this score no longer indents its first system, so it cannot pin this defect"
+    )
+    assert first.label_raw, "the indented first staff was read as having no name"
+    assert not first.voice.startswith("Voice "), (
+        f"the indented first staff was labelled {first.voice!r} instead of being named"
+    )
+
+
+def test_d31_the_song_starts_on_the_score_s_first_line():
+    """The voice that sings the first line is given the first line."""
+    score_doc, plans = plan_for("More Than Sparrows", "WY")
+    assert not any(v.startswith("Voice ") for v in plans), (
+        f"a staff was left unnamed and took a line of the song with it: {list(plans)}"
+    )
+    first_line = min(score_doc.lines, key=lambda line: line.id)
+    lead = plans["Lead 1"]
+    assert lead.assignments[0].score_line_id == first_line.id, (
+        "Lead 1 starts at score line "
+        f"{lead.assignments[0].score_line_id}, not the score's own first line"
+    )
+    assert first_line.text.startswith("From"), first_line.text
