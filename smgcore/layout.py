@@ -22,6 +22,7 @@ whose later pages are nearly empty.
 
 from __future__ import annotations
 
+import difflib
 import re
 import statistics
 import unicodedata
@@ -428,11 +429,20 @@ def _is_stray_letter(text: str) -> bool:
     full stop is doing a job - the 'K.' closing 'O-K.', the 'j-' opening a word
     the translator broke at the syllable - and only a letter with nothing
     attached to it at all is the slip.
+
+    All of that is an argument about the Latin alphabet, which spells a syllable
+    out of separate consonants and vowels. It says nothing about a script that
+    does not: a Chinese character, a Korean syllable block and a kana are each a
+    whole syllable written as one character, and are the ordinary case rather
+    than a slip. Nor could this ever judge Cyrillic or Greek, whose vowels are
+    not in the Latin list either and so were being thrown away as consonants.
     """
     if len(text) != 1:
         return False
     letter = unicodedata.normalize("NFKD", text.lower())[0]
-    return letter.isalpha() and letter not in VOWELS
+    if not ("a" <= letter <= "z"):
+        return False
+    return letter not in VOWELS
 
 
 def _grid_boxes_for_row(grid_boxes: list[fitz.Rect], row_y: float) -> list[fitz.Rect]:
@@ -1040,6 +1050,85 @@ def _already_on_page(page_words, y: float, x0: float, x1: float, text: str) -> b
     return False
 
 
+def _page_twin(page_rows, y: float):
+    """The page's own drawn copy of the row an annotation sits on, if there is one."""
+    best, gap = None, None
+    for row in page_rows:
+        if not row:
+            continue
+        distance = abs(min(word[0] for word in row) - y)
+        if distance <= 4.0 and (gap is None or distance < gap):
+            best, gap = row, distance
+    return best
+
+
+def _annotation_extras(twin, matches):
+    """The words an annotation carries that its drawn copy on the page does not.
+
+    A FreeText annotation is stored twice: as the text the translator typed, and
+    as the appearance the viewer draws from it. When the box was drawn narrower
+    than the text needs, the appearance is *clipped* - the last syllable of the
+    row is simply not in the page's copy - so the two are neither identical nor
+    is one a substring of the other, and the whole-row test above lets the
+    annotation through to be read word by word.
+
+    Word by word is where it went wrong. Positions in the annotation are
+    estimated by counting characters across the box, and against a clipped
+    appearance that estimate drifts steadily rightward: the first syllables
+    still overlap their drawn twins enough to be recognised, and the last ones
+    no longer do, so they are added a second time and print twice.
+
+    Reading the row as a sequence settles it. The two lists of words are aligned,
+    and only what the annotation genuinely has in addition is kept - here the one
+    clipped syllable. It is placed by where the matched words either side of it
+    actually landed on the page, so a syllable added this way sits in the cell it
+    was typed in rather than at a guess.
+
+    Returns None when the two are not the same row, leaving the caller's
+    word-by-word path to deal with it.
+    """
+    page_words = sorted(twin, key=lambda word: word[1])
+    want = [fold(word[3]) for word in page_words]
+    have = [fold(word) for word, _, _ in matches]
+    blocks = difflib.SequenceMatcher(None, want, have, autojunk=False).get_matching_blocks()
+    if not any(block.size for block in blocks):
+        return None
+
+    # Where a character of the annotation's text fell on the page, learnt from
+    # the words that did match: each pairing gives the two ends of one word.
+    anchors: list[tuple[float, float]] = []
+    paired: set[int] = set()
+    for block in blocks:
+        for step in range(block.size):
+            page_word = page_words[block.a + step]
+            _, start_char, end_char = matches[block.b + step]
+            anchors.append((start_char, page_word[1]))
+            anchors.append((end_char, page_word[2]))
+            paired.add(block.b + step)
+    if len(anchors) < 2:
+        return None
+    anchors.sort()
+
+    def where(char: float) -> float:
+        if char <= anchors[0][0]:
+            first, second = anchors[0], anchors[1]
+        elif char >= anchors[-1][0]:
+            first, second = anchors[-2], anchors[-1]
+        else:
+            first = max((a for a in anchors if a[0] <= char), key=lambda a: a[0])
+            second = min((a for a in anchors if a[0] > char), key=lambda a: a[0])
+        span = second[0] - first[0]
+        if span <= 0:
+            return first[1]
+        return first[1] + (second[1] - first[1]) * (char - first[0]) / span
+
+    y = min(word[0] for word in page_words)
+    extras = []
+    for index, (word, start_char, end_char) in enumerate(matches):
+        if index in paired or not fold(word):
+            continue
+        extras.append((round(y, 1), where(start_char), where(end_char), word))
+    return extras
 
 
 
@@ -1215,7 +1304,8 @@ def _read_rows(doc) -> tuple[list[dict], dict[int, float]]:
         # then no longer a substring of it - so without this the whole line is
         # added a second time and every syllable arrives twice.
         existing: set[str] = set()
-        for row in _cluster_rows(items, 4.0):
+        page_rows = _cluster_rows(items, 4.0)
+        for row in page_rows:
             words = [w[3] for w in row]
             existing.add(fold(" ".join(words)))
             plain = [w for w in words if not w.startswith("(")]
@@ -1241,10 +1331,24 @@ def _read_rows(doc) -> tuple[list[dict], dict[int, float]]:
                 # carry most of the position; ignoring them walks the estimate
                 # steadily off to the left of where the syllable really sits.
                 length = max(len(piece), 1)
-                for match in re.finditer(r"\S+", piece):
-                    word = match.group(0)
-                    start = rect.x0 + width * match.start() / length
-                    end = rect.x0 + width * match.end() / length
+                matches = [(m.group(0), m.start(), m.end())
+                           for m in re.finditer(r"\S+", piece)]
+
+                # If the page already draws this row, read the two as sequences
+                # rather than comparing each word's estimated position with what
+                # was drawn. A box drawn too narrow for its own text clips the
+                # last syllable out of the drawn copy, and the estimate then
+                # drifts far enough that the syllables before it stop matching
+                # and are printed twice.
+                twin = _page_twin(page_rows, y)
+                extras = _annotation_extras(twin, matches) if twin else None
+                if extras is not None:
+                    items.extend(extras)
+                    continue
+
+                for word, start_char, end_char in matches:
+                    start = rect.x0 + width * start_char / length
+                    end = rect.x0 + width * end_char / length
                     if not _already_on_page(page_words, y, start, end, word):
                         items.append((round(y, 1), start, end, word))
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import unicodedata
 from dataclasses import dataclass
 
 import pymupdf as fitz
@@ -20,6 +21,15 @@ SYSTEM_FALLBACKS = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
 ]
+
+# Any font file dropped into the app's 'fonts' folder joins the chain below, so
+# a script none of the bundled fonts covers - Thai, Devanagari - is a matter of
+# putting a .ttf there rather than of changing this file.
+FONT_SUFFIXES = (".ttf", ".otf", ".ttc")
+
+# PyMuPDF carries Droid Sans Fallback inside itself. That is where Chinese,
+# Japanese and Korean come from, so nothing has to be installed for them.
+BUILTIN_CJK = "cjk"
 
 
 # Proofing colours. These are for the copy shown in the app while the score is
@@ -65,6 +75,237 @@ def resolve_font_path(choice: str) -> str:
     raise FileNotFoundError(
         "No Unicode font was found. Place a .ttf file in the app's 'fonts' folder."
     )
+
+
+def _needs_glyph(ch: str) -> bool:
+    """Whether a character has to be drawn, rather than merely spacing or steering."""
+    if ch.isspace():
+        return False
+    # Zero-width joiners, direction marks and the like steer the shaping of the
+    # characters around them and are never drawn on their own; a font is not
+    # unfit for a syllable because it has no picture of one.
+    return unicodedata.category(ch) not in ("Cf", "Cc")
+
+
+def _covers(font, text: str) -> bool:
+    return all(font.has_glyph(ord(ch)) for ch in text if _needs_glyph(ch))
+
+
+def compose(text: str) -> str:
+    """Write accented letters as the single character the font has a picture of.
+
+    A translator's `a` + combining tilde and the single letter `ã` are the same
+    letter, but only the second is one glyph. Drawing the first puts the tilde
+    wherever the pen happens to be, because nothing here shapes text - so the
+    composed spelling is used everywhere, for measuring and for drawing alike.
+    """
+    return unicodedata.normalize("NFC", text)
+
+
+def _clusters(text: str) -> list[tuple[str, str]]:
+    """Split into (letter, the marks written on it)."""
+    out: list[list[str]] = []
+    for ch in text:
+        if unicodedata.combining(ch) and out:
+            out[-1][1] += ch
+        else:
+            out.append([ch, ""])
+    return [(base, marks) for base, marks in out]
+
+
+@dataclass
+class _Face:
+    name: str          # what the font is registered as on a page
+    font: object       # fitz.Font, for measuring
+    source: dict       # how to register it: {"fontfile": ...} or {"fontbuffer": ...}
+
+
+class FontChain:
+    """The chosen font, plus the others needed for scripts it cannot draw.
+
+    A text font covers the alphabet it was cut for and nothing else. Liberation
+    Serif has no Chinese, no Korean, no Arabic; asked for one it hands back the
+    .notdef glyph, and PyMuPDF draws that as a nul character - so a Chinese score
+    came out with every one of its syllables silently missing, the notes bare and
+    nothing on the page to say why.
+
+    So the font is settled per syllable rather than once for the document: the
+    first font in the chain that can draw every character of that syllable. The
+    chosen font stays at the head of the chain, so a score in a Latin-alphabet
+    language is set in exactly the font it always was, and a syllable reaches a
+    fallback only when its own font genuinely cannot draw it.
+
+    Measuring has to use the same font as drawing. A Chinese character is a full
+    em wide where a Latin letter is a third of one, and the type size for the
+    whole score is worked out from these widths - so measuring Chinese with a
+    Latin font does not merely mis-space one syllable, it mis-sizes the score.
+    """
+
+    def __init__(self, choice: str):
+        self.faces: list[_Face] = []
+        self.missing: set[str] = set()
+        self._chosen: dict[str, _Face] = {}
+        self._registered: set[tuple[int, str]] = set()
+        self._ink: dict[tuple[str, str], float] = {}
+        seen: set[str] = set()
+
+        def add_file(path: str) -> None:
+            path = os.path.abspath(path)
+            if path in seen or not os.path.exists(path):
+                return
+            seen.add(path)
+            try:
+                font = fitz.Font(fontfile=path)
+            except Exception:
+                return  # a file in the fonts folder that is not a usable font
+            self._add(font, {"fontfile": path})
+
+        add_file(resolve_font_path(choice))
+        for filename in BUNDLED_FONTS.values():
+            add_file(os.path.join(FONT_DIR, filename))
+        if os.path.isdir(FONT_DIR):
+            for filename in sorted(os.listdir(FONT_DIR)):
+                if filename.lower().endswith(FONT_SUFFIXES):
+                    add_file(os.path.join(FONT_DIR, filename))
+        for path in SYSTEM_FALLBACKS:
+            add_file(path)
+        try:
+            builtin = fitz.Font(BUILTIN_CJK)
+            self._add(builtin, {"fontbuffer": builtin.buffer})
+        except Exception:
+            pass
+
+        if not self.faces:
+            raise FileNotFoundError(
+                "No Unicode font was found. Place a .ttf file in the app's 'fonts' folder."
+            )
+
+    def _add(self, font, source: dict) -> None:
+        # The first face keeps the name the renderer has always used, so a score
+        # in a Latin-alphabet language is byte-for-byte the document it was.
+        name = "Lyrics" if not self.faces else f"Lyrics{len(self.faces)}"
+        self.faces.append(_Face(name, font, source))
+
+    def face_for(self, text: str) -> _Face:
+        """The first font that can draw this syllable whole.
+
+        Where no font can, the one that draws the most of it is used and the
+        characters nothing has are remembered, so that the app can say which
+        script needs a font rather than printing gaps and leaving it at that.
+        """
+        text = compose(text)
+        face = self._chosen.get(text)
+        if face is not None:
+            return face
+        for candidate in self.faces:
+            if _covers(candidate.font, text):
+                self._chosen[text] = candidate
+                return candidate
+        wanted = [ch for ch in text if _needs_glyph(ch)]
+        face = max(
+            self.faces,
+            key=lambda f: sum(1 for ch in wanted if f.font.has_glyph(ord(ch))),
+        )
+        self.missing.update(
+            ch for ch in wanted
+            if not any(f.font.has_glyph(ord(ch)) for f in self.faces)
+        )
+        self._chosen[text] = face
+        return face
+
+    def width(self, text: str, size: float) -> float:
+        return self.face_for(text).font.text_length(compose(text), fontsize=size)
+
+    def ink_centre(self, face: _Face, ch: str) -> float:
+        """Where a glyph's ink sits, measured from the pen position, per unit size.
+
+        PyMuPDF reports one font-wide bounding box for every glyph, so the only
+        way to learn where a mark actually falls is to draw it and look. Measured
+        once per glyph and remembered; only a syllable carrying a combining mark
+        ever asks.
+        """
+        key = (face.name, ch)
+        if key in self._ink:
+            return self._ink[key]
+        size, pen, baseline = 100.0, 100.0, 130.0
+        probe = fitz.open()
+        page = probe.new_page(width=300, height=170)
+        page.insert_font(fontname="probe", **face.source)
+        page.insert_text((pen, baseline), ch, fontname="probe", fontsize=size)
+        pix = page.get_pixmap(colorspace=fitz.csGRAY)
+        data, wide = pix.samples, pix.width
+        left = right = None
+        for row in range(pix.height):
+            line = data[row * wide:(row + 1) * wide]
+            for column, value in enumerate(line):
+                if value < 250:
+                    if left is None or column < left:
+                        left = column
+                    if right is None or column > right:
+                        right = column
+        centre = 0.0 if left is None else ((left + right + 1) / 2 - pen) / size
+        self._ink[key] = centre
+        return centre
+
+    def draw(self, shape, page, point, text: str, size: float, colour) -> None:
+        """Draw a syllable, putting any combining mark over the letter it belongs to.
+
+        Nothing here shapes text: a combining mark is a zero-width glyph drawn
+        wherever the pen has reached, which for a wide letter such as `ʉ` lands it
+        over the *next* letter - `mʉ̃a` printed as `mʉã`. Composed spellings are
+        used wherever Unicode has one; for the rest - `ʉ̃` has no single character -
+        the letters are drawn as one run and each mark is then placed over the
+        middle of its own letter.
+        """
+        text = compose(text)
+        face = self.face_for(text)
+        self.register(page, face)
+        x, baseline = point
+        if not any(unicodedata.combining(ch) for ch in text):
+            shape.insert_text((x, baseline), text, fontname=face.name,
+                              fontsize=size, color=colour)
+            return
+        parts = _clusters(text)
+        spine = "".join(base for base, _ in parts)
+        shape.insert_text((x, baseline), spine, fontname=face.name,
+                          fontsize=size, color=colour)
+        for index, (base, marks) in enumerate(parts):
+            if not marks:
+                continue
+            pen = x + face.font.text_length(spine[:index], fontsize=size)
+            middle = pen + self.ink_centre(face, base) * size
+            for mark in marks:
+                shape.insert_text(
+                    (middle - self.ink_centre(face, mark) * size, baseline),
+                    mark, fontname=face.name, fontsize=size, color=colour)
+
+    def register(self, page, face: _Face) -> None:
+        """Embed a font in a page, the first time that page draws in it.
+
+        Lazily, because the CJK fallback is several megabytes: a score that never
+        needed it must not carry it.
+        """
+        key = (page.number, face.name)
+        if key not in self._registered:
+            page.insert_font(fontname=face.name, **face.source)
+            self._registered.add(key)
+
+    def used_fallback(self) -> bool:
+        """Whether anything was drawn in a font other than the one chosen."""
+        return any(name != self.faces[0].name for _, name in self._registered)
+
+    def shortfall(self) -> str:
+        """What to tell the user when a script had no font at all, or ''."""
+        if not self.missing:
+            return ""
+        scripts = sorted({unicodedata.name(ch, "").split()[0].title()
+                          for ch in self.missing} - {""})
+        shown = "".join(sorted(self.missing)[:12])
+        return (
+            f"No available font can draw {' and '.join(scripts) or 'some'} characters "
+            f"({shown}), so those syllables are printed with gaps in them. Put a font "
+            "that covers this language into the app's 'fonts' folder and generate again."
+        )
 
 
 def check_geometry(score_doc, blank_bytes: bytes) -> list[str]:
@@ -131,7 +372,7 @@ def _wrapped_token(score_line, index: int, token: str, total: int) -> str:
 
 def render(
     score_doc, blank_bytes: bytes, placements, settings: RenderSettings, held=None,
-    nudges=None, marks=None, layout_out=None
+    nudges=None, marks=None, layout_out=None, warnings_out=None
 ) -> bytes:
     """Draw the syllables onto the blank score.
 
@@ -160,12 +401,17 @@ def render(
     found from at all, so this is the only honest source for anything that has
     to point at a syllable on the page - the click targets in the editor above
     all, which used to be computed from the anchors and so missed both.
+
+    ``warnings_out``, if given a list, is filled with anything the person
+    generating the score has to be told - at present, that a language was set in
+    a script no available font can draw.
     """
     doc = fitz.open(stream=blank_bytes, filetype="pdf")
-    font_path = resolve_font_path(settings.font_choice)
-    font = fitz.Font(fontfile=font_path)
-    for page in doc:
-        page.insert_font(fontname="Lyrics", fontfile=font_path)
+    # One font cannot draw every language, so the syllable chooses the font: see
+    # FontChain. Fonts are embedded page by page as they are first used, rather
+    # than up front, because the fallback that carries Chinese, Japanese and
+    # Korean is several megabytes and most scores never need it.
+    chain = FontChain(settings.font_choice)
 
     staff_span = {(s.page, s.index): (s.x0, s.x1) for s in score_doc.staves}
     held = held or {}
@@ -209,7 +455,7 @@ def render(
         drawn = [text for _, text in seats if text]
         if not drawn:
             return settings.max_size
-        needed = sum(font.text_length(text, fontsize=settings.max_size) for text in drawn)
+        needed = sum(chain.width(text, settings.max_size) for text in drawn)
         needed += GAP * (len(drawn) - 1)
         available = (x1_limit - 1) - (x0_limit + 1)
         if needed <= 0 or available <= 0:
@@ -280,16 +526,17 @@ def render(
         # sets the lyrics of a score at one size; sizing each line on its own
         # crowding makes one line come out visibly smaller than the line above
         # it, which reads as a mistake even when every syllable in it is right.
-        width = font.text_length(text, fontsize=size)
+        width = chain.width(text, size)
         x = centre - width / 2
         if hard_left is not None:
             x = min(max(x, hard_left), max(hard_left, hard_right - width))
-        shape(page_number).insert_text(
+        chain.draw(
+            shape(page_number),
+            doc[page_number],
             (x, baseline),
             text,
-            fontname="Lyrics",
-            fontsize=size,
-            color=colour if colour is not None else settings.colour,
+            size,
+            colour if colour is not None else settings.colour,
         )
 
     def vacancy(page_number, centre, baseline, colour):
@@ -369,7 +616,7 @@ def render(
         # whole line being set smaller: a point or two off-centre reads as
         # engraving, a line in smaller type reads as a mistake.
         filled = [seat for seat in seats if seat[1]]
-        widths = [font.text_length(seat[1], fontsize=size) for seat in filled]
+        widths = [chain.width(seat[1], size) for seat in filled]
         placed = resolve_overlaps([seat[0] for seat in filled], widths,
                                   x0_limit, x1_limit)
         moved = iter(placed)
@@ -400,6 +647,17 @@ def render(
 
     if not drawn:
         raise ValueError("Nothing was placed - every line was left empty.")
+    if warnings_out is not None:
+        shortfall = chain.shortfall()
+        if shortfall:
+            warnings_out.append(shortfall)
+    # The CJK fallback holds tens of thousands of characters and a score uses a
+    # few hundred. Subsetting keeps a Chinese score the size of an English one.
+    if chain.used_fallback():
+        try:
+            doc.subset_fonts()
+        except Exception:
+            pass
     return doc.tobytes(garbage=4, deflate=True)
 
 
