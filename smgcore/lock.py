@@ -328,8 +328,30 @@ def _segment(lock: Lock, wanted: list[str], section: str, voice: str,
                 # written in the box it takes, and which accounts for most of the
                 # line, is a doubling. A loose fit that agrees here and there is just
                 # a wrong row found a different way.
+                # Where a written row answers the whole of a line box for box,
+                # that is the reading, and nothing shorter may displace it.
+                #
+                # `_subsequence` stops at the first word it cannot place and was
+                # judged on how far it had got, so a single English word spelt
+                # differently between the two documents could beat a reading that
+                # accounts for everything. The score engraves `grat ti tude.`
+                # where the layout writes `grat- i- tude.`, and stopping there
+                # scored a flawless twelve of twelve against the straight
+                # reading's thirteen of fourteen: it won, took twelve notes, and
+                # left `pa-` unsung on the thirteenth of a row that matched the
+                # line box for box.
+                #
+                # Only that case is protected. Stopping early is how a line that
+                # carries on into another written row is read at all, so it stays
+                # the rule everywhere the row and the line are not the same length
+                # - which is why this asks for both, and allows one disagreement
+                # in case the two documents spell one word differently.
+                one_to_one = (
+                    span == len(run) == len(wanted) and hits >= span - 1.0 - 1e-9
+                )
                 exact = agreed >= len(boxes) - 1e-9 and len(boxes) >= SUBSEQUENCE_MINIMUM
-                if exact and len(boxes) >= SUBSEQUENCE_SHARE * span and agreed > worth:
+                if (exact and not one_to_one
+                        and len(boxes) >= SUBSEQUENCE_SHARE * span and agreed > worth):
                     places, hits = boxes, agreed
                     span = len(places)
 

@@ -1327,3 +1327,58 @@ def test_d32_a_mixed_row_splits_the_same_way_for_every_answering_part():
         assert _eligible_positions(line, voice) == [1, 3], (
             f"{voice!r} was not given the boxes marked for the answering parts"
         )
+
+
+# ------------------------------------------------------------------------- D33
+#
+# Open Your Hand / QUB, Female Lead, page 3. The score engraves the line as
+# `... with grat ti tude.` and the layout writes it `... with grat- i- tude.` -
+# fourteen notes against fourteen boxes, the same line, one English word split
+# a syllable differently by the two documents.
+#
+# The reading that accounts for all fourteen was displaced by one that stopped
+# at the disagreement, because a reading was judged on how well it agreed with
+# what it had got through rather than on how much it accounted for. Twelve boxes
+# matched flawlessly beat thirteen of fourteen, so twelve notes were set, `pa-`
+# was never sung, and its note came out empty in the middle of a row that
+# matched the line box for box.
+# ---------------------------------------------------------------------------
+
+
+def test_d33_a_row_that_answers_the_whole_line_is_not_displaced_by_a_shorter_read():
+    """Fourteen boxes against fourteen notes: every one of them carries a syllable."""
+    _, plans = plan_for("Open Your Hand", "QUB")
+    lead = plans["Female Lead 1"]
+    line = next(
+        (a for a in lead.assignments if a.english.startswith("The way you do not hold back")),
+        None,
+    )
+    assert line is not None, "the line is no longer in this score"
+    assert len(line.tokens) == 14, f"expected 14 notes, got {len(line.tokens)}"
+    assert all(line.tokens), (
+        "a note was left empty on a row that matches the line box for box: "
+        + " ".join(t or "·" for t in line.tokens)
+    )
+    assert line.tokens[-3:] == ["ya-", "na-", "pa-"] or "pa-" in line.tokens, (
+        f"'pa-' was dropped: {' '.join(line.tokens)}"
+    )
+
+
+def test_d33_a_line_carrying_on_into_another_row_still_stops_where_it_should():
+    """The guard is narrow: stopping early is how a wrapped line is read at all.
+
+    Open Your Hand's Harmony 1 reads its opening from one row and carries on into
+    two more. An earlier attempt at the fix above forbade a reading from stopping
+    short at all, which pushed this line onto the wrong rows and put `Dios.` on it
+    twice.
+    """
+    _, plans = plan_for("Open Your Hand", "QUB")
+    line = next(
+        (a for a in plans["Harmony 1"].assignments
+         if a.english.startswith("I want to im it ate")),
+        None,
+    )
+    assert line is not None, "the line is no longer in this score"
+    placed = " ".join(line.tokens)
+    assert "k'a- cha" in placed, f"the harmony took the wrong row: {placed}"
+    assert placed.count("Dios.") <= 1, f"a syllable was set twice over: {placed}"
