@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
+from . import textutil
 from .layout import BLANK_BOX
 
 
@@ -55,15 +56,20 @@ class PairingResult:
 
 
 def _is_harmony_row(line) -> bool:
-    """Whether the layout explicitly says this row is harmony-only.
+    """Whether the layout says this row belongs to a part answering the lead.
 
     Color/marker classification is already performed by the layout parser, so
-    pairing must respect it as a semantic constraint. A yellow harmony row is
-    allowed to exist only on the harmony side of the finished score; it must
-    never be paired to an ordinary lead row just because it occupies the next
-    visual row.
+    pairing must respect it as a semantic constraint. Such a row is allowed to
+    exist only on the answering side of the finished score; it must never be
+    paired to an ordinary lead row just because it occupies the next visual row.
+
+    A harmony is not the only part this is true of. An ad-lib row and a backing
+    row are written and marked the same way and must be kept off the lead for
+    the same reason, so the tag is read through `textutil.names_support_part`
+    rather than by looking for the word 'harmony' alone.
     """
-    return "harmon" in (getattr(line, "tag", "") or "").lower()
+    tag = (getattr(line, "tag", "") or "").lower()
+    return "harmon" in tag or textutil.names_support_part(tag)
 
 
 def _row_xs(line):

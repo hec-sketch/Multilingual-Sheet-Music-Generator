@@ -1223,3 +1223,107 @@ def test_d31_the_song_starts_on_the_score_s_first_line():
         f"{lead.assignments[0].score_line_id}, not the score's own first line"
     )
     assert first_line.text.startswith("From"), first_line.text
+
+
+# ------------------------------------------------------------------------- D32
+#
+# A score is written for the lead and for the parts that answer it. The layout
+# marks an answering part's words as theirs - a yellow cell fill, or a marker
+# beside the row - and those words must never be handed to the lead.
+#
+# Harmonies were the only part that rule was written for. Ad libs and backing
+# vocals are written and marked identically and every rule about a harmony is a
+# rule about them, but each site spelt out its own list and they had drifted:
+# a row marked BGV or Backing fell past every branch of the tag test and was
+# offered to the lead, and a row marked "(Ad Libs)" was offered *only* to a
+# voice whose name contained "ad lib" with a space in it - so not to a harmony,
+# and not to a voice spelling itself "Adlib".
+# ---------------------------------------------------------------------------
+
+
+SUPPORT_TAGS = ["Harmonies", "Harmony", "(Ad Libs)", "Ad Lib", "BGV", "Backing Vocals"]
+
+
+def test_d32_no_part_that_answers_the_lead_is_offered_to_the_lead():
+    """The one hard rule, and it must hold for every way of naming the part."""
+    from smgcore.align import _tag_fits
+
+    for tag in SUPPORT_TAGS:
+        assert not _tag_fits(tag, "Male Lead 1"), (
+            f"a row marked {tag!r} was offered to the lead"
+        )
+
+
+def test_d32_every_answering_part_is_offered_every_answering_row():
+    """Harmony, ad lib and backing are one case, so they all reach one another."""
+    from smgcore.align import _tag_fits
+
+    for tag in SUPPORT_TAGS:
+        for voice in ["Male Harmony 1", "Male Ad Libs 2", "Bgv 1", "Alto 1"]:
+            assert _tag_fits(tag, voice), f"{tag!r} was refused to {voice!r}"
+
+
+def test_d32_the_leads_own_ad_libs_stay_with_the_lead():
+    """A name that says Lead says which singer it is, whatever it says after.
+
+    By Faith writes `Male Lead Adlib 1` for the lead improvising over their own
+    line; it sings the lead's words, and reading the word `Adlib` as a part of
+    its own put the yellow Bridge row on it and cost that case a row.
+    `Male Ad Libs 1`, with no lead in the name, is a part of its own.
+    """
+    from smgcore.textutil import is_lead_part, is_support_part
+
+    assert is_lead_part("Male Lead Adlib 1")
+    assert is_lead_part("Male Lead Dbl 1")
+    assert is_lead_part("Male Lead 1")
+    for name in ["Male Ad Libs 1", "Bgv 1", "Backing Vocal 2", "Male Harmony 1", "Alto 1"]:
+        assert is_support_part(name), f"{name!r} was read as carrying the tune"
+
+
+def test_d32_a_marker_beside_a_row_is_read_for_every_part():
+    """The layout may name the part in the margin instead of colouring the cells."""
+    from smgcore.layout import HARMONY_MARKER
+    from smgcore.textutil import names_support_part
+
+    for marker in ["(Harmonies)", "Harmony", "(Ad Libs)", "Ad Libs", "BGV",
+                   "(Backing Vocals)", "Armonías"]:
+        assert HARMONY_MARKER.match(marker), f"{marker!r} was not read as a part marker"
+        assert names_support_part(marker), f"{marker!r} did not name a part"
+
+
+def test_d32_ordinary_words_are_not_read_as_a_part_marker():
+    """The corpus sings 'all', 'call' and 'small'; none of them names a part."""
+    from smgcore.textutil import names_support_part
+
+    for word in ["all", "call", "small", "fall.", "Chorus 1", "Bridge", "", "lead me"]:
+        assert not names_support_part(word), f"{word!r} was read as naming a part"
+
+
+def test_d32_a_row_marked_for_an_answering_part_is_kept_off_a_lead_row():
+    """Pairing's hard constraint holds for every part, not only harmony."""
+    from smgcore.pairing import _is_harmony_row
+
+    class Row:
+        def __init__(self, tag):
+            self.tag = tag
+
+    for tag in SUPPORT_TAGS:
+        assert _is_harmony_row(Row(tag)), f"a row tagged {tag!r} was left unprotected"
+    for tag in ["", "Lead", "Chorus 1"]:
+        assert not _is_harmony_row(Row(tag))
+
+
+def test_d32_a_mixed_row_splits_the_same_way_for_every_answering_part():
+    """Yellow boxes to the parts that answer, the rest to the lead."""
+    from smgcore.lock import LockLine, _eligible_positions
+
+    line = LockLine(
+        id=0, section="", tag="", english=["a", "b", "c", "d"],
+        keys=["a", "b", "c", "d"], translated=["1", "2", "3", "4"],
+        semantic=["", "harmony", "", "harmony"],
+    )
+    assert _eligible_positions(line, "Male Lead 1") == [0, 2]
+    for voice in ["Male Harmony 1", "Male Ad Libs 2", "Bgv 1", "Backing Vocal 1"]:
+        assert _eligible_positions(line, voice) == [1, 3], (
+            f"{voice!r} was not given the boxes marked for the answering parts"
+        )

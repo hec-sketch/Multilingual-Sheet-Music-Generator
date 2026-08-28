@@ -22,6 +22,7 @@ import re
 from dataclasses import dataclass, field, replace
 
 from .layout import BLANK_BOX
+from . import textutil
 from .textutil import fold
 
 
@@ -263,21 +264,31 @@ def expand_translation(translation: dict, english_lines) -> dict:
 
 
 def _is_lead(voice: str) -> bool:
-    lowered = voice.lower()
-    return "lead" in lowered or "solo" in lowered or "melody" in lowered
+    return textutil.is_lead_part(voice)
 
 
 def _tag_fits(tag: str, voice: str) -> bool:
+    """Whether a row the layout marked for a part may be offered to this voice.
+
+    A row marked for any part that answers the lead - harmony, ad lib, backing -
+    is offered to every voice that is not the lead, and to no lead. They are one
+    case, not three: the layout marks such a row to keep it off the lead, and
+    which answering part takes it is settled by the words and the notes like
+    anything else.
+
+    Reading them as three cases is what went wrong before. The ad-lib branch
+    asked the voice's name to contain 'ad lib', so a row marked '(Ad Libs)' was
+    refused to a voice called `Male Lead Adlib 1` - which spells it without the
+    space, and which the lead test had already claimed anyway, on the strength
+    of the word 'Lead' in a name that means the opposite.
+    """
     if not tag:
         return True
     lowered = tag.lower()
-    voice_lower = voice.lower()
-    if "harmon" in lowered or "armon" in lowered:
+    if "harmon" in lowered or "armon" in lowered or textutil.names_support_part(lowered):
         return not _is_lead(voice)
     if "lead" in lowered or "solo" in lowered:
         return _is_lead(voice)
-    if "ad lib" in lowered:
-        return "ad lib" in voice_lower
     return True
 
 

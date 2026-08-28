@@ -96,3 +96,53 @@ def looks_like_lyric(text: str) -> bool:
     if re.fullmatch(r"[\d\W_]+", stripped):
         return False
     return True
+
+
+# --------------------------------------------------------------------------- parts
+#
+# A score is written for the lead and for the parts that answer it. The layout
+# marks the answering parts' words as theirs alone - a yellow cell fill, or a
+# "(Harmonies)" marker beside the row - and those words must never be handed to
+# the lead, nor the lead's to them.
+#
+# Harmonies are not the only such part. Ad libs and backing vocals are written
+# and marked exactly the same way, and every rule about a harmony is a rule
+# about them. They are named here once so that no site has to spell out its own
+# list and drift from the others.
+
+# What the layout may write beside a row to say whose words these are.
+SUPPORT_PART_WORDS = (
+    "harmony", "harmonies", "harmonias", "armonias", "armonía", "armonías",
+    "ad lib", "ad libs", "adlib", "adlibs",
+    "bgv", "bgvs", "backing", "backing vocal", "backing vocals",
+)
+
+# Carrying the tune: the lead itself, anything doubling it, and the lead's own
+# ad libs. A name that says "Lead" says which singer this is, and it settles the
+# question even when the name goes on to say what they are doing - By Faith
+# writes `Male Lead Adlib 1` for the lead's own improvising over their own line,
+# and it sings the lead's words. `Male Ad Libs 1`, with no lead in the name, is
+# a part of its own and answers the lead like any harmony.
+_LEAD_NAME = re.compile(r"\blead\b|\bsolo\b|\bmelody\b|\bl[ií]der\b|\bprincipal\b", re.I)
+
+
+def is_support_part(name: str) -> bool:
+    """Whether this voice answers the lead: a harmony, an ad lib, a backing vocal."""
+    lowered = (name or "").lower()
+    if not lowered.strip():
+        return False
+    if _LEAD_NAME.search(lowered):
+        return False
+    return True
+
+
+def is_lead_part(name: str) -> bool:
+    """Whether this voice carries the tune. A doubling of the lead still is."""
+    return bool((name or "").strip()) and not is_support_part(name)
+
+
+def names_support_part(text: str) -> bool:
+    """Whether a marker written beside a row names one of the answering parts."""
+    core = (text or "").strip().strip("()[]").strip().rstrip(":").strip().lower()
+    core = _WS.sub(" ", core)
+    return core in SUPPORT_PART_WORDS

@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 
 from .align import Assignment, VoicePlan, _tag_fits, normalize_section
 from .layout import BLANK_BOX
+from . import textutil
 from .textutil import fold
 
 # How much of a stretch has to be recognised before its translation is trusted.
@@ -166,9 +167,17 @@ def _agrees(written: str, sung: str) -> float:
 def _eligible_positions(line: LockLine, voice: str, relaxed: bool = False) -> list[int]:
     """Token-level routing for mixed rows.
 
-    If a written row contains any yellow Harmony boxes, Lead voices may use only
-    the non-Harmony boxes and harmony voices may use only the yellow boxes. Rows
-    without yellow boxes keep the normal voice-routing behavior.
+    If a written row contains any yellow boxes, the lead may use only the boxes
+    that are not yellow and the parts answering it may use only the yellow ones.
+    Rows without yellow boxes keep the normal voice-routing behavior.
+
+    Which side a voice falls on is settled by `textutil.is_lead_part`, so a
+    harmony, an ad lib and a backing vocal are all read the same way - they are
+    the same thing to a layout, and were only ever different here because this
+    test spelt out a list of its own. It also has to be a test rather than a
+    substring: a score routinely names an ad lib after the lead it answers, and
+    reading `Male Lead Adlib 1` as the lead gave it the lead's words and left
+    its own unsung.
 
     The routing says which part sings those words *here*. It does not say the
     words are barred from the other part everywhere in the song: a line written
@@ -182,7 +191,7 @@ def _eligible_positions(line: LockLine, voice: str, relaxed: bool = False) -> li
     sem = line.semantic if len(line.semantic) == len(line.keys) else [""] * len(line.keys)
     if not any(c == "harmony" for c in sem):
         return list(range(len(line.keys)))
-    if "lead" in voice.lower() or "solo" in voice.lower() or "melody" in voice.lower():
+    if textutil.is_lead_part(voice):
         return [i for i, c in enumerate(sem) if c != "harmony"]
     return [i for i, c in enumerate(sem) if c == "harmony"]
 

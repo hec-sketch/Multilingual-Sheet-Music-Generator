@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 
 import pymupdf as fitz
 
-from .textutil import DASHES, fold, normalize_spacing
+from .textutil import DASHES, fold, names_support_part, normalize_spacing
 
 BARE_NUMBER = re.compile(r"^\d+$")
 
@@ -78,8 +78,22 @@ LINE_TAGS = re.compile(
 # boxes themselves, so it must be captured BEFORE box-first filtering removes the
 # surrounding marker. Once captured it becomes line metadata and is never counted
 # as a lyric token.
-HARMONY_MARKER = re.compile(r"^\(?\s*harmon(?:y|ies)\s*\)?$", re.I)
-HARMONY_MARKER_ANYWHERE = re.compile(r"\(?\s*harmon(?:y|ies)\s*\)?", re.I)
+#
+# Harmonies are not the only part written this way. An ad-lib row and a backing
+# row are marked with the same yellow and named beside the row in the same
+# manner, and every rule about a harmony row is a rule about them - so all of
+# them are matched here rather than the word 'harmony' alone.
+# The whole-cell form may name the part in any language the layouts use, because
+# the cell holds the marker and nothing else.
+_SUPPORT_PART_WHOLE = (
+    r"harmon(?:y|ies)|armon[ií]as?|ad\s*-?\s*libs?|bgvs?|backing(?:\s+vocals?)?"
+)
+# The search-anywhere form is run over a whole row of lyrics, so it admits only
+# the spellings no song would sing. `armonías` is a Spanish word before it is a
+# marker and is deliberately left out of this one.
+_SUPPORT_PART_INLINE = r"harmon(?:y|ies)|ad\s*-?\s*libs?|bgvs?|backing\s+vocals?"
+HARMONY_MARKER = re.compile(rf"^\(?\s*(?:{_SUPPORT_PART_WHOLE})\s*\)?$", re.I)
+HARMONY_MARKER_ANYWHERE = re.compile(rf"\(?\s*(?:{_SUPPORT_PART_INLINE})\s*\)?", re.I)
 
 # Prose that is an instruction to the singer, not lyrics.
 #
@@ -995,7 +1009,7 @@ def _drop_stray_fragments(lines: list[LayoutLine]) -> None:
         # "By faith" / "ta-noujain" is only two boxes long but is real sung
         # material. Never discard a line that the layout explicitly marks as
         # Harmony-only.
-        if (getattr(line, "tag", "") or "").lower() == "harmonies" or getattr(line, "color_class", "") == "harmony":
+        if names_support_part(getattr(line, "tag", "")) or getattr(line, "color_class", "") == "harmony":
             continue
         width = line.tokens[-1].x1 - line.tokens[0].x0
         hyphenated = any(token.text.rstrip().endswith(tuple(DASHES)) for token in line.tokens)
@@ -1561,7 +1575,7 @@ def parse_layout(pdf_bytes: bytes) -> LayoutDoc:
             # label sits in the instruction/side column.  Never let the side-column
             # heuristic turn a yellow Harmony lyric row into a note; doing so removes
             # the English Harmony row before split_in_half()/pairing ever sees it.
-            is_harmony_material = color_class == "harmony" or tag.lower() == "harmonies"
+            is_harmony_material = color_class == "harmony" or names_support_part(tag)
             if INSTRUCTION_HINT.search(body_text) or TITLE_LINE.match(body_text):
                 kind = "lyric" if is_harmony_material else "note"
             elif len(tokens) == 1 and tokens[0].text == BLANK_BOX:
