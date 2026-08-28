@@ -846,6 +846,50 @@ step = int(st.session_state.get("active_step", 1))
 st.write("")
 
 
+def hold_the_page_still(tag: str) -> None:
+    """Leave the page where the person left it when Streamlit redraws it.
+
+    Correcting a row rebuilds the step from the new reading, and Streamlit throws
+    the window back to the top every time it does - so a word erased from a table
+    halfway down the page costs a scroll back to where you were working. The
+    position is remembered against the step and put back once the redrawn page has
+    settled, which is the whole of it: after that first moment the page scrolls
+    normally again.
+    """
+    components.html(
+        """
+        <script>
+        (function () {
+          const top = window.parent, doc = top.document;
+          const key = "smg-scroll-%s";
+          const pane = doc.querySelector('section[data-testid="stMain"]')
+                    || doc.querySelector('section.main')
+                    || doc.scrollingElement;
+          if (!pane) { return; }
+          if (top.__smgUnwatch) { top.__smgUnwatch(); }
+          let settling = true;
+          const remember = () => {
+            if (!settling) { top.sessionStorage.setItem(key, String(pane.scrollTop)); }
+          };
+          pane.addEventListener('scroll', remember, {passive: true});
+          top.__smgUnwatch = () => pane.removeEventListener('scroll', remember);
+          const wanted = parseFloat(top.sessionStorage.getItem(key) || "0");
+          const until = Date.now() + 900;
+          const settle = () => {
+            if (wanted > 0 && Math.abs(pane.scrollTop - wanted) > 2) {
+              pane.scrollTop = wanted;
+            }
+            if (Date.now() < until) { top.setTimeout(settle, 40); } else { settling = false; }
+          };
+          settle();
+        })();
+        // %s
+        </script>
+        """ % (tag, os.urandom(4).hex()),
+        height=0,
+    )
+
+
 def next_step_button(number: int, label: str) -> None:
     """The way forward from the bottom of a step, so the bar is not the only route."""
     st.markdown("---")
@@ -1181,16 +1225,47 @@ if step == 2:
             else "No voice is currently assigned to this line."
         )
 
+        # The grid is as long as the longer of the two rows, never as long as the
+        # English one alone. Shorten the English line by a word and its translated
+        # row still has every syllable it had, each on a row of its own, so they
+        # can be moved up into the notes that remain. Cutting the grid to the
+        # English length instead would hide the surplus syllables behind a note
+        # they had been folded onto, with no way to see or move them.
+        boxes = list(english_line.tokens)
+        pair_by_english = {
+            pair.english_id: pair for pair in pairs if pair.english_id is not None
+        }
+        pair_here = pair_by_english.get(picked)
+        translated_row = (
+            translated_by_id.get(pair_here.translated_id)
+            if pair_here is not None and pair_here.translated_id is not None
+            else None
+        )
+        raw = list(translated_row.tokens) if translated_row is not None else []
+        if picked not in st.session_state["pair_overrides"] and len(raw) > len(boxes):
+            # More syllables than notes and nothing settled here by hand yet: show
+            # the row as the translator wrote it, one syllable to a row.
+            seed = [str(token) for token in raw]
+        else:
+            seed = [str(token) for token in current]
+
+        shown = [
+            (seed[index] if index < len(seed) else "")
+            for index in range(max(len(boxes), len(seed)))
+        ]
         grid = pd.DataFrame(
             [
                 {
-                    "Note": index + 1,
+                    "Note": str(index + 1) if index < len(boxes) else "",
                     "English": (
-                        "▫  held note" if token == layout_mod.BLANK_BOX else token
+                        "▫  held note"
+                        if index < len(boxes) and boxes[index] == layout_mod.BLANK_BOX
+                        else boxes[index] if index < len(boxes)
+                        else "—  past the last note"
                     ),
-                    "Syllable": (current[index] if index < len(current) else ""),
+                    "Syllable": shown[index],
                 }
-                for index, token in enumerate(english_line.tokens)
+                for index in range(len(shown))
             ]
         )
         edited_grid = st.data_editor(
@@ -1199,7 +1274,7 @@ if step == 2:
             width='stretch',
             height=min(420, 60 + 35 * len(grid)),
             column_config={
-                "Note": st.column_config.NumberColumn(width="small", disabled=True),
+                "Note": st.column_config.TextColumn(width="small", disabled=True),
                 "English": st.column_config.TextColumn(
                     width="medium", disabled=True, help="The English word set on this note"
                 ),
@@ -1213,7 +1288,14 @@ if step == 2:
             key=f"grid_editor_{picked}_{st.session_state['pair_round']}",
         )
         typed = [str(v or "").strip() for v in edited_grid["Syllable"].tolist()]
-        if typed != [str(t) for t in current]:
+        # Rows past the last note are only there to hold syllables that have
+        # nowhere to sit yet. Empty one by moving its syllable up and it goes,
+        # which is how a long row is brought back to the count of the notes.
+        settled = list(shown)
+        for row in (typed, settled):
+            while len(row) > len(boxes) and not row[-1]:
+                row.pop()
+        if typed != settled:
             st.session_state["pair_overrides"][picked] = typed
             st.info(
                 "Saved. "
@@ -1629,3 +1711,8 @@ if step == 3:
             "what you have been through from what you have not. The colour is only here on "
             "screen — the downloaded score is plain black."
         )
+
+
+# Last of all, so that nothing above it is moved by the empty frame it draws:
+# put the window back where the person had it before the redraw.
+hold_the_page_still(f"step{step}")
