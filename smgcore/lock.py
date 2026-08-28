@@ -680,13 +680,34 @@ def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=Non
                 last_text = token
             if sung is not None:
                 sung.add((line.id, position))
+        # The scan above looks between one box the stretch takes and the next, so
+        # it can only ever find a box that has another one after it. A word the
+        # engraving set as one on the *last* note of the stretch leaves its second
+        # box past the end of that, where nothing was looking: We Go Preaching
+        # prints `OK.` on one note where the layout writes `O-` and `K.`, and the
+        # note came out carrying `ri-` alone with `cui` left behind. It is the
+        # same merge as any other and the second box is sung the same way - the
+        # only difference is where it sits.
+        last_box = places[-1]
+        note = len(tokens) - 1
+        tail = last_box + 1
+        if (tail < len(line.keys) and 0 <= note < len(wanted)
+                and _engraved_as_one(line, last_box, tail, wanted[note])):
+            extra = (line.translated[tail] or "").strip()
+            if extra and extra != BLANK_BOX and tokens:
+                mid_held.append((note, extra, True))
+            # The box has been sung, so this voice has reached past it. Leaving
+            # the mark on the box before would read the next line as a fresh
+            # entry mid-word and fold this syllable onto its opening note too.
+            last_box = tail
+
         if line.id not in used:
             used.append(line.id)
         if rows_sung is not None:
             rows_sung.add(line.id)
         last, after = line, number
-        ends_at = (line.id, places[-1])
-        floor = lock.flat(number, places[-1] + 1)
+        ends_at = (line.id, last_box)
+        floor = lock.flat(number, last_box + 1)
 
     # Anything the translation sings that the English prints no syllable for goes
     # on the notes the English holds, in the order it was written.

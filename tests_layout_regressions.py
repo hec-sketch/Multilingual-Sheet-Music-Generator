@@ -1641,3 +1641,73 @@ def test_d38_the_join_still_requires_the_boxes_to_spell_the_word_exactly():
     places, hits = _straight_read(line, run, ["youre", "ok", "now"])
     assert places == [0, 1, 2], places
     assert hits == pytest.approx(1.0), hits
+
+
+# ------------------------------------------------------------------------- D39
+#
+# A joined word was only ever collected by the scan that looks *between* one box
+# the stretch takes and the next, so it could only find a second box that had
+# another box after it. Where the joined word is the last note of the stretch,
+# its second box sits past the end of that scan and nothing was looking there.
+#
+# We Go Preaching prints `OK.` on the final note of a system where the layout
+# writes `O-` and `K.`. The join was detected correctly - the row read a clean
+# eleven of eleven - and then the note was set with `ri-` alone and `cui` was
+# left behind, on every voice singing the line.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("variant", ["QII", "WY"])
+def test_d39_a_word_joined_on_the_last_note_still_sings_both_boxes(variant):
+    """`OK.` ends the line, and both `O-` and `K.` are sung on its note."""
+    _, plans = plan_for("We Go Preaching", variant)
+    line = next(
+        (a for a in plans["Female Lead 1"].assignments if a.english.rstrip().endswith("OK.")),
+        None,
+    )
+    assert line is not None, "the line ending on 'OK.' is no longer in this score"
+
+    lock_line = _layout_row_ending_ok("We Go Preaching", variant)
+    first, second = lock_line[-2], lock_line[-1]
+
+    sung = " ".join(line.tokens) + " " + line.held_text
+    assert first in sung.split(), f"{first!r} was not sung: {sung}"
+    assert second in sung.split(), (
+        f"{second!r} was left behind - the join was found but its second box "
+        f"never reached the note: {sung}"
+    )
+    # Both belong to the one note the engraving gave the word.
+    assert line.tokens[-1] == f"{first} {second}", line.tokens[-1]
+
+
+def test_d39_the_next_line_carries_on_past_the_joined_box():
+    """The joined box is sung, so the line after it does not sing it again."""
+    _, plans = plan_for("We Go Preaching", "QII")
+    assignments = plans["Female Lead 1"].assignments
+    index = next(i for i, a in enumerate(assignments) if a.english.rstrip().endswith("OK."))
+    following = assignments[index + 1]
+
+    assert following.tokens[0] == "u-", (
+        f"the next line opens on {following.tokens[0]!r}; the joined box was either "
+        "sung twice or folded onto its opening note"
+    )
+    assert "cui" not in following.tokens, (
+        f"'cui' was sung again on the next line: {following.tokens}"
+    )
+
+
+def _layout_row_ending_ok(song: str, variant: str) -> list[str]:
+    """The translated syllables of the layout row whose English ends `O-` `K.`."""
+    english_lines, translated_lines = halves(song, variant)
+    pairs = pairing_mod.pair_layouts(english_lines, translated_lines).pairs
+    english_lines = layout_mod.inherit_pair_tags(english_lines, pairs, translated_lines)
+    translation = pairing_mod.translation_map(
+        pairs, translated_lines, {}, english_lines
+    )
+    for line in english_lines:
+        tokens = [t.rstrip(".-") for t in line.tokens]
+        for position in range(len(tokens) - 1):
+            if tokens[position] == "O" and tokens[position + 1] == "K":
+                words = translation.get(line.id) or []
+                return list(words[: position + 2])
+    raise AssertionError(f"{song}/{variant} no longer writes 'O-' 'K.' in its layout")
