@@ -1421,3 +1421,67 @@ def test_d34_the_line_broken_across_an_apostrophe_is_set_whole():
         + " ".join(t or "·" for t in line.tokens)
     )
     assert line.tokens == ["do-", "nan-", "ki."], line.tokens
+
+
+# ------------------------------------------------------------------------- D35
+#
+# A translator writes one box per syllable, because that is what a syllable
+# layout is. An engraver sets the lyric under the notes, and where two syllables
+# fall under a slur the whole word is often typeset once: Open Your Hand prints
+# `Showing` where the layout properly writes `show-` and `ing`. Neither document
+# is wrong - they are counting different things - and the row comes out one box
+# longer than the line has notes.
+#
+# Read one box to one note, everything from that word onward slid along by one:
+# three notes bare at the head of the line and the four syllables that belong on
+# them never sung, on every voice that sings the line.
+# ---------------------------------------------------------------------------
+
+
+def test_d35_a_word_the_engraver_set_as_one_takes_both_its_boxes():
+    """`Showing` answers for `show-` and `ing`, and nothing slides along by one."""
+    _, plans = plan_for("Open Your Hand", "QUB")
+    line = next(
+        (a for a in plans["Female Lead 1"].assignments
+         if a.english.startswith("Giv ing to oth ers")),
+        None,
+    )
+    assert line is not None, "the line is no longer in this score"
+    assert all(line.tokens), (
+        "notes were left bare: " + " ".join(t or "·" for t in line.tokens)
+    )
+    assert line.tokens[0] == "i-", (
+        f"the line still opens one box late: {' '.join(line.tokens)}"
+    )
+    # Both of the layout's syllables are sung, whether on the held note or
+    # together on the one note the engraving gave the word.
+    sung = " ".join(line.tokens) + " " + line.held_text
+    for syllable in ("tu-", "kuy"):
+        assert syllable in sung.split(), f"{syllable!r} was not sung: {sung}"
+
+
+def test_d35_boxes_are_only_joined_where_the_row_outruns_the_notes():
+    """The gate that keeps the join honest, and the case that taught it.
+
+    We Go Preaching writes `preach-` and `ing.` and its score prints
+    `preaching.`, but there the row is no longer than the stretch of notes being
+    read, so every box has a note of its own and joining two could only take one
+    away. Joining regardless cost that case a row.
+    """
+    from smgcore.lock import LockLine, _straight_read
+
+    line = LockLine(
+        id=0, section="", tag="",
+        english=["go,", "there-", "fore,", "preach-", "ing."],
+        keys=["go", "there", "fore", "preach", "ing"],
+        translated=["pa", "cau-", "sai-", "ta-", "ca"],
+    )
+    run = [0, 1, 2, 3, 4]
+
+    # Five boxes against five notes: no room to join, so nothing is joined.
+    places, _ = _straight_read(line, run, ["go", "there", "fore", "preaching", "to"])
+    assert places == [0, 1, 2, 3, 4], places
+
+    # Five boxes against four notes: the row outruns them, so the join is on.
+    places, _ = _straight_read(line, run, ["go", "there", "fore", "preaching"])
+    assert places == [0, 1, 2, 3], places

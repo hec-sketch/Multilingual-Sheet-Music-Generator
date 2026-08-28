@@ -178,6 +178,71 @@ def _agrees(written: str, sung: str) -> float:
     return 0.0
 
 
+def _engraved_as_one(line: LockLine, first: int, second: int, word: str) -> bool:
+    """Whether the engraving set two of the row's boxes as a single printed word.
+
+    A translator writes one box per syllable, because that is what a syllable
+    layout is for. An engraver sets the lyric under the notes, and where two
+    syllables fall on a slur the lyric is often typeset as the whole word once:
+    Open Your Hand prints `Showing` under two notes where the layout properly
+    writes `show-` and `ing`. Neither document is wrong; they are counting
+    different things.
+
+    Both boxes must carry English of their own, and the first must end in the
+    hyphen with which a translator writes a syllable that runs on into the next.
+    A blank box carries no English at all and folds to nothing, so without that
+    first condition it joined with whatever followed it and matched: `-` and `en`
+    read as the score's `en`, and the held note it stands for was swallowed.
+    """
+    if second >= len(line.keys):
+        return False
+    head, tail = line.keys[first], line.keys[second]
+    if not head or not tail:
+        return False
+    if not line.english[first].rstrip().endswith(HYPHENS):
+        return False
+    return head + tail == word
+
+
+def _straight_read(line: LockLine, run: list[int], wanted: list[str]):
+    """Read a row against the notes one for one, and what it is worth.
+
+    One box to one note, in order - except where the engraving set two boxes as
+    one word. There the two boxes answer for one note together: the first takes
+    it, and the second is passed over here and put on the note the score holds
+    under that word, so that everything after it stays on its own note instead of
+    sliding along by one.
+
+    Merging is allowed only where the row has more boxes than the stretch has
+    notes. That is the very situation a merged engraving creates - one printed
+    word covering two of the layout's syllables leaves the row one box longer
+    than the line - and confining it there keeps the reading honest: where the
+    row is no longer than the notes, every box has a note of its own to go to
+    and joining two of them could only take one away.
+
+    Returns the box for each note, and how much of the English they agreed with.
+    """
+    places: list[int] = []
+    hits = 0.0
+    box = 0
+    may_merge = len(run) > len(wanted)
+    for word in wanted:
+        if box >= len(run):
+            break
+        agreed = _agrees(line.keys[run[box]], word)
+        if agreed < 1.0 and may_merge and box + 1 < len(run) and _engraved_as_one(
+            line, run[box], run[box + 1], word
+        ):
+            places.append(run[box])
+            hits += 1.0
+            box += 2
+            continue
+        places.append(run[box])
+        hits += agreed
+        box += 1
+    return places, hits
+
+
 def _eligible_positions(line: LockLine, voice: str, relaxed: bool = False) -> list[int]:
     """Token-level routing for mixed rows.
 
@@ -319,11 +384,10 @@ def _segment(lock: Lock, wanted: list[str], section: str, voice: str,
             run = [offset]
             while run[-1] + 1 in eligible:
                 run.append(run[-1] + 1)
-            span = min(len(run), len(wanted))
+            places, hits = _straight_read(line, run, wanted)
+            span = len(places)
             if span <= 0:
                 continue
-            places = run[:span]
-            hits = sum(_agrees(line.keys[run[index]], wanted[index]) for index in range(span))
 
             # A doubling part sings the lead's line with words left out - the score
             # prints 'faith I move a moun-tain.' where the lead sings 'faith I can
@@ -361,7 +425,8 @@ def _segment(lock: Lock, wanted: list[str], section: str, voice: str,
                 # - which is why this asks for both, and allows one disagreement
                 # in case the two documents spell one word differently.
                 one_to_one = (
-                    span == len(run) == len(wanted) and hits >= span - 1.0 - 1e-9
+                    places[-1] == run[-1] and span == len(wanted)
+                    and hits >= span - 1.0 - 1e-9
                 )
                 exact = agreed >= len(boxes) - 1e-9 and len(boxes) >= SUBSEQUENCE_MINIMUM
                 if (exact and not one_to_one
@@ -547,9 +612,10 @@ def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=Non
     after: int | None = None
     ends_at = previous
     floor = cursor
-    # (anchor index, syllable) for syllables the translation sings on notes the
-    # English holds a vowel across, found in the middle of a written row.
-    mid_held: list[tuple[int, str]] = []
+    # (anchor index, syllable, whether the box was merged into the note's word)
+    # for syllables the translation sings on notes the English holds a vowel
+    # across, found in the middle of a written row.
+    mid_held: list[tuple[int, str, bool]] = []
 
     while len(tokens) < need:
         found = _segment(lock, wanted[len(tokens):], score_line.section, voice,
@@ -576,11 +642,22 @@ def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=Non
             # written one, and it belongs on that held note rather than nowhere.
             if index > 0:
                 for skipped in range(places[index - 1] + 1, position):
-                    if line.keys[skipped]:
+                    # A box with English in it was passed over for one of two
+                    # reasons. Either this part does not sing that word - a
+                    # doubling voice reading the lead's line - and the box is
+                    # rightly left behind; or the engraving set it and the box
+                    # before it as a single printed word, in which case it is
+                    # sung, on the note the score holds under that word.
+                    note = len(tokens) - 1
+                    merged = (
+                        0 <= note < len(wanted)
+                        and _engraved_as_one(line, places[index - 1], skipped, wanted[note])
+                    )
+                    if line.keys[skipped] and not merged:
                         continue
                     extra = (line.translated[skipped] or "").strip()
                     if extra and extra != BLANK_BOX and tokens:
-                        mid_held.append((len(tokens) - 1, extra))
+                        mid_held.append((len(tokens) - 1, extra, merged))
             token = line.translated[position]
             if index == 0 and offset > 0 and ends_at != (line.id, offset - 1):
                 plain = token
@@ -610,11 +687,19 @@ def place_line(lock: Lock, score_line, voice: str, cursor: int = 0, previous=Non
     # on the notes the English holds, in the order it was written.
     held: list[tuple] = []
     taken: set[float] = set()
-    for anchor_index, extra in mid_held:
+    for anchor_index, extra, merged in mid_held:
         free = [x for x in score_line.held_after(anchor_index) if x not in taken]
         if free:
             held.append((free[0], extra))
             taken.add(free[0])
+        elif merged and 0 <= anchor_index < len(tokens):
+            # The engraving set two of the layout's syllables as one word and gave
+            # it a single note - We Go Preaching prints `preaching` where the
+            # layout writes `preach-` and `ing.`. There is no held note to put the
+            # second on, so both are sung on the one note, which is exactly what
+            # the layout means by two syllables written in one box. Dropping it
+            # instead, as this did, loses a syllable the translator wrote.
+            tokens[anchor_index] = f"{tokens[anchor_index]} {extra}".strip()
     if last is not None and last.spare and need:
         spare = list(last.spare)
         for position in score_line.held_after(need - 1):
