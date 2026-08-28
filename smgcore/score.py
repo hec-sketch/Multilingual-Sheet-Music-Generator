@@ -363,6 +363,15 @@ def assign_voices(all_staves: list[Staff], warnings: list[str]) -> list[str]:
         return (rank, name.split()[0] if name else "", int(digits[-1]) if digits else 0)
 
     ordered.sort(key=sort_key)
+
+    # A score written for one voice alone has nothing to disambiguate - there is
+    # no second part it could be confused with, so an unreadable margin is not a
+    # problem to flag. It is simply the lead.
+    if len(ordered) == 1 and ordered[0].startswith("Voice"):
+        for staff in all_staves:
+            staff.voice = "Lead 1"
+        return ["Lead 1"]
+
     if any(s.voice.startswith("Voice") for s in all_staves):
         warnings.append(
             "Some staves had no readable name in the left margin and were labelled 'Voice N'. "

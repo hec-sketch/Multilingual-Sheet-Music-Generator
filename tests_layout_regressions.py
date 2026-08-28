@@ -1225,6 +1225,38 @@ def test_d31_the_song_starts_on_the_score_s_first_line():
     assert first_line.text.startswith("From"), first_line.text
 
 
+# ------------------------------------------------------------------------- D36
+#
+# A score written for one voice alone has nothing for that voice to be confused
+# with. An unreadable margin was still flagged as "Some staves had no readable
+# name... rename them if needed" even when there was only ever one part to
+# rename it from - a chore with no ambiguity behind it, on every song with a
+# single lead and no harmonies, ad libs, or other parts.
+# ---------------------------------------------------------------------------
+
+
+def test_d36_a_single_voice_score_is_not_flagged_for_renaming():
+    """One unlabeled staff, with nothing else in the score, is just the lead."""
+    staff = score_mod.Staff(page=0, index=0, top=0, bottom=10, x0=50, x1=400, system=0)
+    warnings: list[str] = []
+    voices = score_mod.assign_voices([staff], warnings)
+
+    assert voices == ["Lead 1"]
+    assert staff.voice == "Lead 1"
+    assert not warnings, f"a single-voice score should never need renaming: {warnings}"
+
+
+def test_d36_two_unlabeled_staves_in_one_system_are_still_flagged():
+    """A real ambiguity - two unnamed staves stacked in the same system - still warns."""
+    first = score_mod.Staff(page=0, index=0, top=0, bottom=10, x0=50, x1=400, system=0)
+    second = score_mod.Staff(page=0, index=1, top=20, bottom=30, x0=50, x1=400, system=0)
+    warnings: list[str] = []
+    voices = score_mod.assign_voices([first, second], warnings)
+
+    assert len(voices) == 2, voices
+    assert warnings, "two unresolved staves in one system should still ask to be renamed"
+
+
 # ------------------------------------------------------------------------- D32
 #
 # A score is written for the lead and for the parts that answer it. The layout
