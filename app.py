@@ -792,7 +792,7 @@ else:
         f'<div class="smg-banner smg-banner--ok">'
         f'<span class="smg-icon">{ICONS["ok"]}</span>'
         "<strong>Nothing needs attention.</strong> Look through the steps if you wish, "
-        "then generate the score in Step 3.</div>",
+        "then collect the finished score in Step 3.</div>",
         unsafe_allow_html=True,
     )
 
@@ -1142,12 +1142,13 @@ if step == 2:
 # --------------------------------------------------------------------------- 3 · PDF
 
 if step == 3:
-    step_header(3, "Generate the score, then correct any syllable where it sits.")
+    step_header(3, "The finished score. Correct any syllable where it sits, then download it.")
 
     placements: dict[int, list[str]] = {}
     held_notes: dict[int, list[tuple]] = {}
     nudges: dict[int, list[float]] = {}
     issues: list[dict] = []
+    bare: list[dict] = []
     for voice_name, voice_plan in plans.items():
         for assignment in voice_plan.assignments:
             tokens = edited_tokens(voice_name, assignment)
@@ -1178,11 +1179,27 @@ if step == 3:
                 )
                 tokens = tokens + [""] * (need - len(tokens))
             placements[assignment.score_line_id] = tokens
+            # Every note that will be printed bare, named one by one. Counting the
+            # *lines* whose syllables do not fill them is not the same thing and
+            # was what this step reported: a line can hold exactly as many
+            # syllables as it has notes with one of them empty, which is no line
+            # to report and a bare note all the same. So the step said 'every note
+            # will carry a syllable' beside a count of 555 of 556.
+            for index, token in enumerate(tokens):
+                if not token:
+                    bare.append(
+                        {
+                            "Voice": voice_name,
+                            "Page": assignment.page + 1,
+                            "English in the score": assignment.english,
+                            "Note": index + 1,
+                        }
+                    )
             if assignment.held:
                 held_notes[assignment.score_line_id] = edited_held(voice_name, assignment)
 
     extra = sum(len(v) for v in held_notes.values())
-    blank = sum(1 for tokens in placements.values() for token in tokens if not token)
+    blank = len(bare)
     total = sum(len(tokens) for tokens in placements.values()) + extra
 
     replaced = st.session_state.get("edits_replaced", 0)
@@ -1203,13 +1220,16 @@ if step == 3:
         st.metric("Notes carrying a syllable", f"{total - blank} of {total}")
     with right:
         verdict(
-            len(issues),
+            blank + len(issues),
             "Every note will carry a syllable.",
-            "The score can still be generated, with those notes left empty and "
-            "filled in on the score below, or the words completed in Step 2 first.",
+            "The score is made either way, with those notes left bare. Fill them in "
+            "on the score below, or complete the words in Step 2 first.",
         )
 
-    attention_table(issues[:15], "Notes that will remain empty")
+    attention_table(bare[:15], "Notes that will be left bare")
+    if len(bare) > 15:
+        st.caption(f"...and {len(bare) - 15} more.")
+    attention_table(issues[:15], "Lines whose syllables do not fit their notes")
     if len(issues) > 15:
         st.caption(f"...and {len(issues) - 15} more.")
 
@@ -1265,20 +1285,20 @@ if step == 3:
                 st.write("- " + text)
 
     st.markdown("---")
-    st.button(
-        "Generate the score",
-        type="primary",
-        width='stretch',
-        key="generate",
-        on_click=lambda: st.session_state.update(has_generated=True),
-    )
+    # The score is made on arriving here, because making it is what this step is
+    # for. A button that only says "yes, do the thing this step exists to do" is a
+    # step in the way: the reader had to press it before they could see anything,
+    # and again after every change made anywhere else. Rendering is cached on the
+    # placements and the type settings, so a score already made costs nothing to
+    # come back to, and a correction re-renders on its own.
+    st.session_state["has_generated"] = True
 
     result = None
     result_layout: list[dict] = []
     font_notes: list[str] = []
     if st.session_state.get("has_generated"):
         # Rendering is cached on the type settings, so moving a slider re-renders and the
-        # preview follows immediately. Generate does not have to be pressed again.
+        # preview follows immediately.
         try:
             result, result_layout, font_notes = render_cached(
                 score_doc,
