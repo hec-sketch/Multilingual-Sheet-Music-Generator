@@ -1382,3 +1382,42 @@ def test_d33_a_line_carrying_on_into_another_row_still_stops_where_it_should():
     placed = " ".join(line.tokens)
     assert "k'a- cha" in placed, f"the harmony took the wrong row: {placed}"
     assert placed.count("Dios.") <= 1, f"a syllable was set twice over: {placed}"
+
+
+# ------------------------------------------------------------------------- D34
+#
+# `ev'ry` is one word with an elision apostrophe in the middle, and the two
+# documents break it on opposite sides of that apostrophe: the engraving prints
+# `ev'` and `ry`, the layout writes `ev-` and `'ry-`.
+#
+# Compared letter for letter, `'ry` and `ry` do not agree at all. That one
+# disagreement dragged the whole three-note stretch below the agreement a
+# reading must reach, so the stretch was thrown away entirely - not one note
+# mis-set but three notes left bare, `do-` and `nan-` never sung, over an
+# apostrophe.
+# ---------------------------------------------------------------------------
+
+
+def test_d34_an_elision_apostrophe_is_not_a_disagreement():
+    """Both sides are English, so the apostrophe inside `ev'ry` is punctuation."""
+    from smgcore.lock import _agrees
+
+    assert _agrees("'ry", "ry") == 1.0, "the layout's `'ry-` did not agree with `ry`"
+    assert _agrees("ev", "ev'") == 1.0, "the layout's `ev-` did not agree with `ev'`"
+    # and a real disagreement is still one
+    assert _agrees("one", "two") == 0.0
+
+
+def test_d34_the_line_broken_across_an_apostrophe_is_set_whole():
+    """Open Your Hand's `... with ev' ry one.` carries `do- nan- ki.`."""
+    _, plans = plan_for("Open Your Hand", "QUB")
+    line = next(
+        (a for a in plans["Female Lead 1"].assignments if a.english.startswith("ev'")),
+        None,
+    )
+    assert line is not None, "the line is no longer in this score"
+    assert all(line.tokens), (
+        "notes were left bare across the apostrophe: "
+        + " ".join(t or "·" for t in line.tokens)
+    )
+    assert line.tokens == ["do-", "nan-", "ki."], line.tokens

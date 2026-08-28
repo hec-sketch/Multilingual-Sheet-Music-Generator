@@ -155,11 +155,25 @@ def build_lock(english_lines, translation: dict[int, list[str]]) -> Lock:
 
 
 def _agrees(written: str, sung: str) -> float:
+    """How far a box's English agrees with the English printed on the note.
+
+    Both sides are English - the layout's box against the engraving's syllable -
+    so the elision apostrophe in a word like `ev'ry` is punctuation inside the
+    word and not part of either syllable. The two documents put the syllable
+    break on opposite sides of it: the engraving prints `ev'` and `ry`, the
+    layout writes `ev-` and `'ry-`. Read letter for letter, `'ry` and `ry` do not
+    agree at all, which was enough to throw away the whole three-note stretch
+    they sit in - the notes came out empty and `do-` and `nan-` went unsung, over
+    an apostrophe.
+    """
     if not sung:
         return 1.0  # the engraving printed nothing here to disagree with
     if written == sung:
         return 1.0
-    if written and (written.startswith(sung) or sung.startswith(written)):
+    bare_written, bare_sung = written.strip("'"), sung.strip("'")
+    if bare_written and bare_written == bare_sung:
+        return 1.0
+    if bare_written and (bare_written.startswith(bare_sung) or bare_sung.startswith(bare_written)):
         return NEAR_WORD
     return 0.0
 
