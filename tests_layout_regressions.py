@@ -1587,3 +1587,57 @@ def test_d35_boxes_are_only_joined_where_the_row_outruns_the_notes():
     # Five boxes against four notes: the row outruns them, so the join is on.
     places, _ = _straight_read(line, run, ["go", "there", "fore", "preaching"])
     assert places == [0, 1, 2, 3], places
+
+
+# ------------------------------------------------------------------------- D38
+#
+# The join above only ever fired where the layout's first box ended in a
+# hyphen, because that is how a translator marks a syllable running on into
+# the next. It is not the only shape a split word takes: a short word can be
+# written as two whole boxes of their own, no hyphen at all - `O` and `K.` -
+# where the engraving still prints them as one word, `OK.`, on a single note.
+# Requiring the hyphen missed that split and gave the note only the first of
+# the two syllables the translator wrote.
+#
+# What actually earns the join is that the two boxes, read together, spell
+# the exact word the score has on that note - which a hyphen is only one way
+# of getting to.
+# ---------------------------------------------------------------------------
+
+
+def test_d38_a_split_with_no_hyphen_still_joins_when_it_spells_the_score_s_word():
+    """`O` and `K.` answer for the score's `OK.`, hyphen or not."""
+    from smgcore.lock import LockLine, _straight_read
+
+    line = LockLine(
+        id=0, section="", tag="",
+        english=["you're", "O", "K.", "now."],
+        keys=["youre", "o", "k", "now"],
+        translated=["ka-", "chi-", "cha-", "mi"],
+    )
+    run = [0, 1, 2, 3]
+
+    # Four boxes against three notes: the row outruns them, so the join is on
+    # even though neither `O` nor `K.` ends in a hyphen.
+    places, hits = _straight_read(line, run, ["youre", "ok", "now"])
+    assert places == [0, 1, 3], places
+    assert hits == pytest.approx(3.0), hits
+
+
+def test_d38_the_join_still_requires_the_boxes_to_spell_the_word_exactly():
+    """A coincidental neighbour is not joined just because a hyphen is absent."""
+    from smgcore.lock import LockLine, _straight_read
+
+    line = LockLine(
+        id=0, section="", tag="",
+        english=["you're", "zip", "fine", "now."],
+        keys=["youre", "zip", "fine", "now"],
+        translated=["ka-", "chi-", "cha-", "mi"],
+    )
+    run = [0, 1, 2, 3]
+
+    # `zip` + `fine` does not spell the score's `OK.`, so nothing is joined and
+    # the row is read straight - it simply disagrees with this stretch.
+    places, hits = _straight_read(line, run, ["youre", "ok", "now"])
+    assert places == [0, 1, 2], places
+    assert hits == pytest.approx(1.0), hits

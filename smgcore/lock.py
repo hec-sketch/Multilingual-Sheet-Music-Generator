@@ -188,18 +188,23 @@ def _engraved_as_one(line: LockLine, first: int, second: int, word: str) -> bool
     writes `show-` and `ing`. Neither document is wrong; they are counting
     different things.
 
-    Both boxes must carry English of their own, and the first must end in the
-    hyphen with which a translator writes a syllable that runs on into the next.
-    A blank box carries no English at all and folds to nothing, so without that
-    first condition it joined with whatever followed it and matched: `-` and `en`
-    read as the score's `en`, and the held note it stands for was swallowed.
+    A hyphenated syllable break is the common shape of this, but not the only
+    one: `O` and `K.` are two whole boxes of their own, no hyphen in sight,
+    where the engraving prints `OK.` on a single note, and the two are read the
+    same way. What actually decides it is that the two boxes, read together,
+    spell the very word the score has on that note - `head + tail == word`
+    below. Coincidence cannot fake that: it would need the layout's two
+    syllables to concatenate into an exact, character-for-character match of
+    the score's own printed word, which does not happen by accident.
+
+    Both boxes must carry English of their own - a blank box carries none at
+    all and folds to nothing, and joining it onto whatever follows would match
+    on nothing rather than on the word actually printed.
     """
     if second >= len(line.keys):
         return False
     head, tail = line.keys[first], line.keys[second]
     if not head or not tail:
-        return False
-    if not line.english[first].rstrip().endswith(HYPHENS):
         return False
     return head + tail == word
 
