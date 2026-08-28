@@ -4,11 +4,13 @@ Writes a translated syllable layout under the notes of an engraved vocal score.
 
 The interface is three numbered steps, and each answers one question.
 
-Step 2 is the syllable layout as the app read it, beside the English line each
-row was matched to. Rewriting a row there changes the reading of the document
-itself and the rows are matched up again; selecting a line settles which
-syllable sits on which note, for every voice singing it. Step 3 generates the
-score and is where one syllable is put right where it sits.
+Step 2 is the syllable layout as the app read it: both halves of the document in
+one table, the English row and the translated row matched to it side by side and
+both editable, with the counts beside them. Rewriting either changes the reading
+of the document itself, so the rows are matched up again and the counts follow;
+selecting a line underneath settles which syllable sits on which note, for every
+voice singing it, and is only needed for a line the table cannot put right. Step
+3 generates the score and is where one syllable is put right where it sits.
 
 They rank in that order, widest first. Rewriting a row lets go of anything
 settled note by note against the old reading of it, and a change in Step 2
@@ -290,18 +292,21 @@ def digest(*chunks: bytes) -> str:
 # exactly what must NOT survive a change of piece: a half-finished edit to row 40
 # of a 52-line layout means nothing to a 23-line one, and a voice picked from the
 # last score may not exist in this one.
-STATE_PREFIXES = ("grid_editor_", "pair_editor_")
+STATE_PREFIXES = ("grid_editor_", "pair_editor_", "layout_editor_")
 STATE_KEYS = (
     "layout_edits",
     "english_edits",
+    "row_meta",
     "pair_overrides",
+    "pair_round",
     "assign_edits",
     "assign_base",
     "edits_replaced",
     "held_edits",
     "dropped_layout",
     "layout_editor",
-    "english_editor",
+    "layout_sync",
+    "layout_note",
     "grid_line",
     "result_pdf",
     "has_generated",
@@ -346,6 +351,7 @@ def seed_state() -> None:
     for key, default in [
         ("layout_edits", {}),
         ("english_edits", {}),
+        ("row_meta", {}),
         ("pair_overrides", {}),
         ("pair_round", 0),
         ("assign_edits", {}),
@@ -612,6 +618,16 @@ all_rows = layout_mod.to_editable(
 english_lines, editable_lines = layout_mod.split_in_half(
     all_rows, layout_doc.page_count, score_words
 )
+# Section and tag are typed into the same table as the words, and are read by the
+# pairing before anything else, so they have to be put back before it runs. They
+# used to live only in the table widget's own memory, which held them for as long
+# as the widget was never rebuilt - and rewriting a row rebuilds it.
+for _line in list(english_lines) + list(editable_lines):
+    _meta = st.session_state["row_meta"].get(_line.id)
+    if _meta:
+        _line.section = _meta.get("section", _line.section)
+        _line.tag = _meta.get("tag", _line.tag)
+
 combined_document = bool(english_lines)
 if not combined_document:
     stop_with_a_way_out(
@@ -925,46 +941,84 @@ if step == 2:
     st.markdown("---")
     st.markdown(
         f"**{pair_result.confidence:.0%} of rows matched.** "
-        "One box per note. Remove the space between two syllables to set them on a single "
-        "note; add a space to separate them again. Clear **Use** to omit a row entirely."
+        "One box per note, in both languages. Remove the space between two syllables to set "
+        "them on a single note; add a space to separate them again. A `-` on its own is a "
+        "held note. Clear **Use** to omit a row entirely."
     )
     st.caption(
-        "Editing a row here changes how the document was read, so the rows are matched up "
-        "again from scratch — which is how a row split or run together in the PDF is put "
-        "right. To settle which syllable sits on which note, select the line underneath "
-        "instead."
+        "Both halves of the document are here: the English as it was read, and the "
+        "translated row matched to it. Editing either changes how the document was read, so "
+        "the rows are matched up again from scratch and the counts beside them are "
+        "recalculated — which is how a row split or run together in the PDF is put right. "
+        "Get a row right here and there is usually nothing left to settle note by note "
+        "below."
     )
 
-    # One row per line of the translated half, in the order it was written, with the
-    # English line it was matched to beside it. Dropped rows are listed too, greyed by
-    # their own unticked box rather than removed, so that omitting a row can be undone.
+    # One row per line of the layout, in the order the document writes it: the
+    # translated row and the English row it was matched to, side by side and both
+    # editable. The English half used to sit in a panel of its own at the foot of
+    # the step, which meant reading a row in one table and correcting it in
+    # another, with no count in front of you while you did it.
+    #
+    # A row of one half with nothing opposite it in the other still gets a line,
+    # so nothing in either half is hidden. Dropped rows are listed too, greyed by
+    # their own unticked box rather than removed, so that omitting one can be undone.
+    english_by_id = {line.id: line for line in english_lines}
+    translated_by_id = {line.id: line for line in editable_lines}
     pair_by_translated = {
         pair.translated_id: pair for pair in pairs if pair.translated_id is not None
     }
+
+    def merged_rows() -> list[tuple]:
+        """(translated line or None, english line or None) down the document."""
+        dropped = [
+            line for line in editable_lines
+            if line.id in st.session_state["dropped_layout"]
+        ]
+        out: list[tuple] = []
+        cursor = 0
+        for pair in pairs:
+            if pair.translated_id is not None:
+                while cursor < len(dropped) and dropped[cursor].id < pair.translated_id:
+                    out.append((dropped[cursor], None))
+                    cursor += 1
+            out.append((
+                translated_by_id.get(pair.translated_id),
+                english_by_id.get(pair.english_id),
+            ))
+        out.extend((line, None) for line in dropped[cursor:])
+        return out
+
+    note = st.session_state.pop("layout_note", "")
+    if note:
+        st.info(note)
+
+    rows = merged_rows()
     layout_frame = pd.DataFrame(
         [
             {
                 "": (
-                    ICONS["ok"] if pair_by_translated.get(line.id)
-                    and pair_by_translated[line.id].status == "ok" else ICONS["warn"]
+                    ICONS["ok"]
+                    if translated is not None
+                    and pair_by_translated.get(translated.id)
+                    and pair_by_translated[translated.id].status == "ok"
+                    else ICONS["warn"]
                 ),
-                "Use": line.id not in st.session_state["dropped_layout"],
-                "Page": line.page + 1,
-                "Section": line.section,
-                "Tag": line.tag,
-                "English": (
-                    show_boxes(pair_by_translated[line.id].english_text)
-                    if line.id in pair_by_translated else "—"
+                "Use": (
+                    translated is None
+                    or translated.id not in st.session_state["dropped_layout"]
                 ),
-                "Notes": (
-                    pair_by_translated[line.id].english_count
-                    if line.id in pair_by_translated else 0
-                ),
-                "Syllables": line.text,
-                "Count": line.note_count,
-                "_id": line.id,
+                "Page": ((translated or english).page + 1),
+                "Section": (translated or english).section,
+                "Tag": (translated or english).tag,
+                "English": english.text if english is not None else "—",
+                "Notes": english.note_count if english is not None else 0,
+                "Syllables": translated.text if translated is not None else "—",
+                "Count": translated.note_count if translated is not None else 0,
+                "_tid": -1 if translated is None else translated.id,
+                "_eid": -1 if english is None else english.id,
             }
-            for line in editable_lines
+            for translated, english in rows
         ]
     )
     edited = st.data_editor(
@@ -982,9 +1036,8 @@ if step == 2:
             "Tag": st.column_config.TextColumn(width="small"),
             "English": st.column_config.TextColumn(
                 width="large",
-                disabled=True,
-                help="The English line this row was matched to. Correct it under Advanced "
-                "below if the English itself was read wrongly.",
+                help="The English row as it was read. Correct it here if the English "
+                "itself was read wrongly; the rows are then matched up again.",
             ),
             "Notes": st.column_config.NumberColumn(
                 width="small", disabled=True, help="Notes the English line has in the score"
@@ -995,49 +1048,106 @@ if step == 2:
             "Count": st.column_config.NumberColumn(
                 width="small", disabled=True, help="Syllables in this row"
             ),
-            "_id": None,
+            "_tid": None,
+            "_eid": None,
         },
-        key="layout_editor",
+        key=f"layout_editor_{st.session_state['pair_round']}",
     )
 
-    # A row rewritten here is a different reading of the document, so anything settled
-    # note by note against the old reading is let go with it - the same order of work the
-    # score step keeps to, one level down.
+    # A row rewritten here - in either language - is a different reading of the
+    # document, so anything settled note by note against the old reading is let go
+    # with it: the same order of work the score step keeps to, one level down.
+    #
+    # Section and tag are written to the row's own line: the translated one where
+    # there is one, otherwise the English one standing alone. The English tag of a
+    # paired row is not touched, because a harmony marker printed on only one half
+    # is copied onto the other after pairing, and writing it here as well would
+    # leave the two disagreeing on every pass.
     changed = 0
     released = 0
     for _, row in edited.iterrows():
-        line_id = int(row["_id"])
-        original = next(l for l in editable_lines if l.id == line_id)
-        if row["Syllables"] != original.text:
-            st.session_state["layout_edits"][line_id] = row["Syllables"]
+        tid, eid = int(row["_tid"]), int(row["_eid"])
+        translated = translated_by_id.get(tid)
+        english = english_by_id.get(eid)
+
+        if translated is not None and row["Syllables"] != translated.text:
+            st.session_state["layout_edits"][tid] = row["Syllables"]
             changed += 1
-            pair = pair_by_translated.get(line_id)
+            pair = pair_by_translated.get(tid)
             if pair is not None and pair.english_id is not None:
                 if st.session_state["pair_overrides"].pop(pair.english_id, None) is not None:
                     released += 1
-        original.section = str(row["Section"] or "")
-        original.tag = str(row["Tag"] or "")
+        if english is not None and row["English"] != english.text:
+            st.session_state["english_edits"][eid] = row["English"]
+            changed += 1
+            if st.session_state["pair_overrides"].pop(eid, None) is not None:
+                released += 1
+
+        own = translated if translated is not None else english
+        if own is not None:
+            section, tag = str(row["Section"] or ""), str(row["Tag"] or "")
+            if (section, tag) != (own.section, own.tag):
+                st.session_state["row_meta"][own.id] = {"section": section, "tag": tag}
+                changed += 1
+            own.section, own.tag = section, tag
+
     st.session_state["dropped_layout"] = {
-        int(r["_id"]) for _, r in edited.iterrows() if not r["Use"]
+        int(r["_tid"]) for _, r in edited.iterrows()
+        if int(r["_tid"]) >= 0 and not r["Use"]
     }
-    if changed:
-        st.info(
-            f"{changed} row(s) edited; the rows have been matched up again and every later "
-            "step uses the new reading."
+
+    # Reading the table is the last thing the step does, so an edit captured here
+    # was made against the reading the page was already drawn from: the counts
+    # beside it, and the note-by-note grid below it, are still the old ones. Going
+    # round once more draws them from the new reading, which is what makes a row's
+    # count follow the words the moment they are changed.
+    #
+    # The round is counted up with it. The table and the grid are rebuilt rather
+    # than patched, and keeping the old widget would replay the edit by row number
+    # against a table whose rows have since moved - which is how a correction came
+    # to be applied twice.
+    #
+    # The signature is what stops that from repeating forever. Reading a row back
+    # can settle it differently from what was typed - two spaces become one, a
+    # repeat marker is written out in full - and the table would then look edited
+    # again on arrival. It goes round only when the edits themselves have moved.
+    signature = json.dumps(
+        [
+            sorted(st.session_state["layout_edits"].items()),
+            sorted(st.session_state["english_edits"].items()),
+            sorted(
+                (key, value.get("section", ""), value.get("tag", ""))
+                for key, value in st.session_state["row_meta"].items()
+            ),
+            sorted(st.session_state["dropped_layout"]),
+        ],
+        default=str,
+    )
+    if changed and st.session_state.get("layout_sync") != signature:
+        st.session_state["layout_sync"] = signature
+        st.session_state["pair_round"] += 1
+        st.session_state["layout_note"] = (
+            f"{changed} row(s) edited; the rows have been matched up again, the counts "
+            "recalculated, and every later step uses the new reading."
             + (f" {released} line(s) settled note by note were released with them."
                if released else "")
         )
+        st.rerun()
 
     # ------------------------------------------------------------------ one line, note by note
+    #
+    # Only for a line the table above cannot settle: the row is right in both
+    # languages and the syllables still need moving from one note to another.
+    # Get the row right above and there is normally nothing to do here.
     st.markdown("---")
-    st.markdown("**Select a line to set its syllables note by note**")
+    st.markdown("**If a line still needs it: set its syllables note by note**")
     st.write(
         "One row per note, showing the English word set on it. Enter the syllable directly into "
         "the box. Two syllables in one box are sung on that note; an empty box leaves the note "
-        "held. An edit here applies to **every voice that sings this line**."
+        "held. An edit here applies to **every voice that sings this line**, and is let go if "
+        "the row it belongs to is rewritten in the table above."
     )
 
-    english_by_id = {line.id: line for line in english_lines}
     choices = [
         pair.english_id
         for pair in pairs
@@ -1089,7 +1199,10 @@ if step == 2:
                     width="medium", help="Leave empty to hold the previous syllable across this note"
                 ),
             },
-            key=f"grid_editor_{picked}",
+            # Counted up with the table above, so that a row rewritten there is
+            # shown here as it now reads. A widget kept across that would put back
+            # what was typed against the old reading of the line.
+            key=f"grid_editor_{picked}_{st.session_state['pair_round']}",
         )
         typed = [str(v or "").strip() for v in edited_grid["Syllable"].tolist()]
         if typed != [str(t) for t in current]:
@@ -1100,41 +1213,9 @@ if step == 2:
                    else "No voice is currently assigned to this line.")
             )
 
-    if combined_document:
-      with st.expander("Advanced · The English layout as it was read", expanded=False):
-        st.write("Change a line here only if the English was read from the document incorrectly.")
-        english_frame = pd.DataFrame(
-            [
-                {
-                    "Page": line.page + 1,
-                    "Section": line.section,
-                    "Tag": line.tag,
-                    "Notes": line.note_count,
-                    "Syllables": line.text,
-                    "_id": line.id,
-                }
-                for line in english_lines
-            ]
-        )
-        edited_english = st.data_editor(
-            english_frame,
-            hide_index=True,
-            width='stretch',
-            height=320,
-            column_config={
-                "Page": st.column_config.NumberColumn(width="small", disabled=True),
-                "Section": st.column_config.TextColumn(width="small"),
-                "Tag": st.column_config.TextColumn(width="small"),
-                "Notes": st.column_config.NumberColumn(width="small", disabled=True),
-                "Syllables": st.column_config.TextColumn(width="large"),
-                "_id": None,
-            },
-            key="english_editor",
-        )
-        for _, row in edited_english.iterrows():
-            original = next(l for l in english_lines if l.id == row["_id"])
-            if row["Syllables"] != original.text:
-                st.session_state["english_edits"][int(row["_id"])] = row["Syllables"]
+    # The English half used to be edited down here, in a panel of its own, apart
+    # from the counts and from the translated row it belongs beside. It is a
+    # column of the table above now.
 
     next_step_button(2, "Continue to Step 3 · Score")
 

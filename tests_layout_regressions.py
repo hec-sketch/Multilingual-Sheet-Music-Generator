@@ -1257,6 +1257,76 @@ def test_d36_two_unlabeled_staves_in_one_system_are_still_flagged():
     assert warnings, "two unresolved staves in one system should still ask to be renamed"
 
 
+# ------------------------------------------------------------------------- D37
+#
+# Step 2 shows both halves of the layout in one table: the translated row and the
+# English row it was matched to, side by side and both editable. The English half
+# used to be edited in a panel of its own at the foot of the step, which meant
+# reading a row in one table and correcting it in another with no count in front
+# of you.
+#
+# One table for two halves that do not hold the same number of rows is the thing
+# that can go wrong. A row of either half with nothing opposite it still has to
+# get a line of its own, or a row the app has to be told about is one the app
+# never shows - and By Faith has exactly that: 23 English rows against 22
+# translated ones.
+# ---------------------------------------------------------------------------
+
+
+def _merged_rows(pairs, editable_lines, english_lines, dropped):
+    """Step 2's table, as `merged_rows()` in app.py builds it."""
+    english_by_id = {line.id: line for line in english_lines}
+    translated_by_id = {line.id: line for line in editable_lines}
+    dropped_lines = [line for line in editable_lines if line.id in dropped]
+    out, cursor = [], 0
+    for pair in pairs:
+        if pair.translated_id is not None:
+            while cursor < len(dropped_lines) and dropped_lines[cursor].id < pair.translated_id:
+                out.append((dropped_lines[cursor], None))
+                cursor += 1
+        out.append((translated_by_id.get(pair.translated_id),
+                    english_by_id.get(pair.english_id)))
+    out.extend((line, None) for line in dropped_lines[cursor:])
+    return out
+
+
+@pytest.mark.parametrize("song,variant", CASES)
+@pytest.mark.parametrize("drop", [False, True])
+def test_d37_the_merged_table_shows_every_row_of_both_halves_once(song, variant, drop):
+    """Neither half loses a row to the merge, and both still read down the page."""
+    english_lines, editable_lines = halves(song, variant)
+    dropped = {editable_lines[3].id, editable_lines[7].id} if drop else set()
+    working = [line for line in editable_lines if line.id not in dropped]
+    pairs = pairing_mod.pair_layouts(english_lines, working).pairs
+    rows = _merged_rows(pairs, editable_lines, english_lines, dropped)
+
+    shown_translated = [t.id for t, _ in rows if t is not None]
+    shown_english = [e.id for _, e in rows if e is not None]
+
+    assert sorted(shown_translated) == sorted(l.id for l in editable_lines), (
+        "the merged table hid or repeated a translated row "
+        f"({len(shown_translated)} shown, {len(editable_lines)} in the half)"
+    )
+    assert sorted(shown_english) == sorted(l.id for l in english_lines), (
+        "the merged table hid or repeated an English row "
+        f"({len(shown_english)} shown, {len(english_lines)} in the half)"
+    )
+    assert shown_translated == sorted(shown_translated), "translated rows are out of order"
+    assert shown_english == sorted(shown_english), "English rows are out of order"
+
+
+def test_d37_a_half_with_a_spare_row_still_gets_a_line_for_it():
+    """By Faith writes one more English row than translated; it is not hidden."""
+    english_lines, editable_lines = halves("By Faith", "QII")
+    assert len(english_lines) > len(editable_lines), (
+        "this case no longer has an unpaired English row, so it cannot pin this defect"
+    )
+    pairs = pairing_mod.pair_layouts(english_lines, editable_lines).pairs
+    rows = _merged_rows(pairs, editable_lines, english_lines, set())
+    spare = [(t, e) for t, e in rows if t is None and e is not None]
+    assert spare, "the English row with nothing opposite it was left out of the table"
+
+
 # ------------------------------------------------------------------------- D32
 #
 # A score is written for the lead and for the parts that answer it. The layout
