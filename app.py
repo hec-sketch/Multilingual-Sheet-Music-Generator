@@ -680,9 +680,17 @@ for voice_name, voice_plan in plans.items():
 
 
 def edited_tokens(voice_name: str, assignment) -> list[str]:
-    """The syllables for one score line, including anything typed over them."""
+    """The syllables for one score line, including anything typed over them.
+
+    Kept as a list, one entry per note, rather than one string split apart
+    again by whitespace. A note's own text is free to hold a space of its own -
+    two words meant to sit on it together, or extra room between them for the
+    engraving - and splitting the line back apart by *any* whitespace would
+    have read that as more notes than the line has, and pushed every note
+    after it one place along.
+    """
     override = st.session_state["assign_edits"].get(f"{voice_name}||{assignment.score_line_id}")
-    return override.split() if override is not None else list(assignment.tokens)
+    return list(override) if override is not None else list(assignment.tokens)
 
 
 def drop_edits_overtaken_by_step_3() -> None:
@@ -704,7 +712,7 @@ def drop_edits_overtaken_by_step_3() -> None:
         for assignment in voice_plan.assignments:
             key = f"{voice_name}||{assignment.score_line_id}"
             typed_against = st.session_state["assign_base"].get(key)
-            if typed_against is None or typed_against == " ".join(assignment.tokens):
+            if typed_against is None or typed_against == list(assignment.tokens):
                 continue
             had = st.session_state["assign_edits"].pop(key, None)
             st.session_state["assign_base"].pop(key, None)
@@ -1594,7 +1602,7 @@ if step == 3:
                         while len(values) <= index:
                             values.append("")
                         values[index] = selected.get("text", "").strip()
-                        st.session_state["assign_edits"][row] = " ".join(values)
+                        st.session_state["assign_edits"][row] = values
                     elif action == "nudge":
                         values = edited_nudges(voice_name, assignment, len(assignment.tokens))
                         values[index] += float(selected.get("delta") or 0.0)
@@ -1603,7 +1611,7 @@ if step == 3:
                     # over, so that a later change there can be seen for what it
                     # is and this correction given up to it.
                     if action in ("edit", "nudge"):
-                        st.session_state["assign_base"][row] = " ".join(assignment.tokens)
+                        st.session_state["assign_base"][row] = list(assignment.tokens)
                     # "keep" settles the note without changing it: the person has
                     # looked at it and is happy, which is exactly what the green
                     # is for. Every action marks it settled.
